@@ -7,7 +7,7 @@ setup(
     name="slowloris",
     py_modules=["slowloris"],
     entry_points={"console_scripts": ["slowloris=slowloris:main"]},
-    version="0.3.0",
+    version="0.3.1",
     description="Low bandwidth DoS tool - Slowloris rewrite in Python",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -17,6 +17,11 @@ setup(
     keywords=["dos", "http", "slowloris", "security", "testing"],
     license="MIT",
     python_requires=">=3.8",
+    install_requires=[
+        "click>=8.0.0",
+        "structlog>=23.0.0",
+        "tenacity>=8.0.0",
+    ],
     classifiers=[
         "Development Status :: 4 - Beta",
         "Environment :: Console",
@@ -32,7 +37,7 @@ setup(
         "Topic :: Security",
     ],
     project_urls={
-        "Bug Reports": "https://github.com/299nls/slowloris/issues",
+        "Bug Reports": "https://github.com/29nls/slowloris/issues",
         "Source": "https://github.com/29nls/slowloris",
     },
     extras_require={
