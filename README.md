@@ -1,14 +1,15 @@
-# slowloris.py - Simple slowloris in Python
+# slowloris.py - Low Bandwidth HTTP Denial of Service Tool
 
 ## What is Slowloris?
 
-Slowloris is basically an HTTP Denial of Service attack that affects threaded servers. It works like this:
+Slowloris is an HTTP Denial of Service attack tool that affects threaded servers. It works by:
 
-1. We start making lots of HTTP requests.
-2. We send headers periodically (every ~15 seconds) to keep the connections open.
-3. We never close the connection unless the server does so. If the server closes a connection, we create a new one keep doing the same thing.
+1. Opening multiple concurrent HTTP connections to the target server
+2. Sending HTTP request headers slowly and periodically to keep connections alive
+3. Maintaining connections without completing the request to exhaust the server's thread pool
+4. Preventing the server from accepting new legitimate connections
 
-This exhausts the servers thread pool and the server can't reply to other people.
+This technique is particularly effective against servers with limited thread pools or connection limits.
 
 ## Security Disclaimer
 
@@ -18,114 +19,126 @@ Always ensure you have explicit written permission before testing any system you
 
 ## Citation
 
-If you found this work useful, please cite it as
+If you found this work useful, please cite it as:
 
 ```bibtex
-@article{gkbrkslowloris,
+@software{maceng_slowloris,
   title = "Slowloris",
-  author = "Gokberk Yaltirakli",
-  journal = "github.com",
-  year = "2015",
-  url = "https://github.com/gkbrk/slowloris"
+  author = "MACENG",
+  year = "2025",
+  url = "https://github.com/29nls/slowloris"
 }
 ```
 
+Original Slowloris concept by Gokberk Yaltirakli (gkbrk)
+
 ## Installation
 
-You can install using **pip** in a virtual environment:
+Install slowloris using pip:
 
 ```bash
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install slowloris
 pip install slowloris
 ```
 
 Or install from source:
 
 ```bash
-git clone https://github.com/gkbrk/slowloris.git
+git clone https://github.com/29nls/slowloris.git
 cd slowloris
 pip install -e .
 ```
 
-## Usage
-
-```bash
-# Basic usage
-slowloris example.com
-
-# Specify port (default: 80)
-slowloris example.com -p 80
-
-# More concurrent connections
-slowloris example.com -s 300
-
-# Use HTTPS
-slowloris example.com --https
-
-# Verbose mode
-slowloris example.com -v
-
-# Randomize user-agents
-slowloris example.com -ua
-```
-
 ### SOCKS5 Proxy Support
 
-For SOCKS5 proxy support, install with the proxy extras:
+For SOCKS5 proxy support, install with the proxy extra:
 
 ```bash
 pip install slowloris[proxy]
 # or: pip install python-socks
 ```
 
-Then use:
-
-```bash
-slowloris example.com -x --proxy-host 127.0.0.1 --proxy-port 8080
-```
-
 ## Configuration Options
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `host` | Target host | (required) |
-| `-p, --port` | Target port | 80 |
-| `-s, --sockets` | Number of concurrent connections | 150 |
-| `-v, --verbose` | Enable verbose logging | false |
-| `-ua, --randuseragents` | Randomize user-agent per connection | false |
-| `-x, --useproxy` | Use SOCKS5 proxy | false |
-| `--proxy-host` | SOCKS5 proxy host | 127.0.0.1 |
-| `--proxy-port` | SOCKS5 proxy port | 8080 |
-| `--https` | Use HTTPS | false |
-| `--sleeptime` | Seconds between keep-alive headers | 15 |
-| `--jitter` | Random jitter added to sleep time | 3 |
-| `--version` | Show version | - |
+All options can be passed as command-line arguments:
 
-## Changes in v0.3.0
+```bash
+slowloris [OPTIONS] HOST
+```
+
+### Example Usage
+
+```bash
+# Basic usage
+slowloris example.com
+
+# Specify port (default: 80)
+slowloris example.com -p 8080
+
+# More concurrent connections
+slowloris example.com -s 300
+
+# Use HTTPS (port 443)
+slowloris example.com --https -p 443
+
+# Verbose logging
+slowloris example.com -v
+
+# Randomize user-agents per connection
+slowloris example.com -ua
+
+# Use SOCKS5 proxy
+slowloris example.com -x --proxy-host 127.0.0.1 --proxy-port 9050
+
+# Adjust keep-alive timing
+slowloris example.com --sleeptime 20 --jitter 5
+```
+
+### Available Options
+
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `HOST` | - | string | required | Target hostname or IP address |
+| `--port` | `-p` | integer | 80 | Target port (1-65535) |
+| `--sockets` | `-s` | integer | 150 | Number of concurrent connections |
+| `--verbose` | `-v` | flag | false | Enable verbose logging output |
+| `--randuseragents` | `-ua` | flag | false | Randomize user-agent per connection |
+| `--useproxy` | `-x` | flag | false | Use SOCKS5 proxy for connections |
+| `--proxy-host` | - | string | 127.0.0.1 | SOCKS5 proxy host |
+| `--proxy-port` | - | integer | 8080 | SOCKS5 proxy port |
+| `--https` | - | flag | false | Use HTTPS instead of HTTP |
+| `--sleeptime` | - | float | 15.0 | Seconds between keep-alive headers |
+| `--jitter` | - | float | 3.0 | Random jitter for sleep time (±seconds) |
+| `--version` | - | - | - | Show version information |
+
+## Features (v0.3.1)
 
 - **Asyncio-based**: Uses Python asyncio for maximum concurrent connections
+- **Click CLI**: Modern command-line interface with Click framework
+- **Structured logging**: Uses structlog for detailed, structured logging output
 - **Class-based architecture**: Clean OOP design without global state
-- **No monkey-patching**: Proper methods instead of socket patches
+- **No monkey-patching**: Proper async/await methods throughout
 - **Type hints**: Full type annotation support
-- **Modern user agents**: Updated browser strings (2024)
-- **IPv6 support**: Uses getaddrinfo for dual-stack
-- **Signal handling**: Graceful shutdown on Ctrl+C
-- **Jitter**: Random sleep variation to avoid patterns
-- **Exponential backoff**: Automatic reconnection with retries
-- **Statistics**: Tracks connection success/failure
+- **Modern user agents**: Updated 2024 browser user-agent strings
+- **IPv6 support**: Automatic IPv4/IPv6 detection via getaddrinfo
+- **HTTPS/TLS 1.3**: Full TLS support with secure ciphers
+- **Signal handling**: Graceful shutdown on Ctrl+C with cleanup
+- **Jitter**: Configurable random variation in keep-alive timing
+- **Exponential backoff**: Automatic retry with exponential backoff via Tenacity
+- **Configuration validation**: Validated config with helpful error messages
+- **Statistics tracking**: Tracks connection success/failure metrics
 
 ## Requirements
 
-- Python 3.8+
-- ssl (stdlib)
-- socket (stdlib)
+- **Python**: 3.8 or higher
+- **Core dependencies**:
+  - `click` >= 8.0.0 (CLI framework)
+  - `structlog` >= 23.0.0 (Structured logging)
+  - `tenacity` >= 8.0.0 (Retry logic)
 
-Optional:
-- python-socks (for SOCKS5 proxy support)
+**Optional dependencies**:
+- `python-socks` >= 1.2.0 (For SOCKS5 proxy support)
+
+All dependencies are automatically installed via pip.
 
 ## License
 
