@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when an attack is detected; `harden` generates request-timeout, per-IP
   connection-cap and rate-limit configuration for nginx, Apache, and HAProxy.
   CI now also type-checks `defense.py`.
+- **Volumetric & amplification detection (`detect-flood`).** Analyses a JSON
+  network-flow snapshot for SYN floods (high-rate SYNs with no completed
+  handshake), UDP/ICMP floods, and reflection/amplification from abused UDP
+  source ports (NTP, DNS, memcached, SSDP, SNMP, CLDAP, chargen). Classifies
+  each offending flow with a severity and exits non-zero on detection.
+- **Network-layer hardening (`harden-net`).** Generates `linux-sysctl` kernel
+  tuning (SYN cookies, backlog, rp_filter, ICMP) and `iptables` SYN/UDP/ICMP
+  rate-limiting plus amplifier-port blocking.
 
 ## [0.6.0]
 
