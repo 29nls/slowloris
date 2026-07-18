@@ -113,14 +113,16 @@ slowloris example.com --sleeptime 20 --jitter 5
 | `--connect-timeout` | - | float | 10.0 | Timeout for connecting and writing (seconds) |
 | `--version` | - | - | - | Show version information |
 
-## Features (v0.3.1)
+## Features (v0.3.2)
 
 - **Asyncio-based**: Uses Python asyncio for maximum concurrent connections
+- **Non-blocking DNS**: Async name resolution via `loop.getaddrinfo` (never blocks the event loop)
+- **Connection/write timeouts**: Configurable `--connect-timeout` guards connects and writes
 - **Click CLI**: Modern command-line interface with Click framework
-- **Structured logging**: Uses structlog for detailed, structured logging output
+- **Structured logging**: Uses structlog; `-v/--verbose` toggles DEBUG (INFO by default)
 - **Class-based architecture**: Clean OOP design without global state
 - **No monkey-patching**: Proper async/await methods throughout
-- **Type hints**: Full type annotation support
+- **Type hints**: Full type annotation support (PEP 585/604)
 - **Modern user agents**: Updated 2026 browser user-agent strings
 - **IPv6 support**: Automatic IPv4/IPv6 detection via getaddrinfo
 - **HTTPS/TLS 1.3**: Full TLS support with secure ciphers
@@ -129,6 +131,7 @@ slowloris example.com --sleeptime 20 --jitter 5
 - **Exponential backoff**: Automatic retry with exponential backoff via Tenacity
 - **Configuration validation**: Validated config with helpful error messages
 - **Statistics tracking**: Tracks connection success/failure metrics
+- **Tested & linted**: pytest suite with Ruff, mypy, and pre-commit in CI
 
 ## Requirements
 

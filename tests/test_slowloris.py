@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import ssl
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -163,3 +165,12 @@ class TestCLI:
         result = CliRunner().invoke(main, args)
         assert result.exit_code == 0
         assert logging.getLogger().level == expected_level
+
+
+class TestPackaging:
+    def test_version_matches_pyproject(self):
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+        assert match is not None
+        assert match.group(1) == slowloris.__version__
