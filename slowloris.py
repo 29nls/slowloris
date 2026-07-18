@@ -492,7 +492,15 @@ def main(
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-    
+
+    if config.useproxy and not _PROXY_AVAILABLE:
+        click.echo(
+            "Error: --useproxy requires the 'python-socks' package. "
+            "Install it with: pip install 'slowloris[proxy]'",
+            err=True,
+        )
+        sys.exit(1)
+
     # Run using the modern asyncio.run() entry point
     try:
         asyncio.run(_run_attack(config))
