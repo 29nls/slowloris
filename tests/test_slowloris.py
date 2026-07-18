@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import ssl
 from dataclasses import FrozenInstanceError
 
@@ -131,3 +132,20 @@ class TestCLI:
         result = CliRunner().invoke(main, ["example.com", "--useproxy"])
         assert result.exit_code == 1
         assert "python-socks" in result.output
+
+    @pytest.mark.parametrize(
+        ("args", "expected_level"),
+        [
+            (["example.com"], logging.INFO),
+            (["example.com", "-v"], logging.DEBUG),
+        ],
+    )
+    def test_verbose_sets_log_level(self, monkeypatch, args, expected_level):
+        async def _noop(config):
+            return None
+
+        monkeypatch.setattr(slowloris, "_run_attack", _noop)
+        logging.getLogger().setLevel(logging.WARNING)
+        result = CliRunner().invoke(main, args)
+        assert result.exit_code == 0
+        assert logging.getLogger().level == expected_level
