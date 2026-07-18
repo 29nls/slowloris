@@ -20,6 +20,7 @@ or manipulate any connection itself.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -838,6 +839,208 @@ def render_flood_html(report: FloodReport) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Configuration audit (find hardening gaps in an existing server config)
+# --------------------------------------------------------------------------- #
+
+_SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+@dataclass(frozen=True)
+class HardeningCheck:
+    """A single directive we expect to see in a hardened server config."""
+
+    id: str
+    pattern: str
+    severity: str
+    description: str
+    remediation: str
+
+
+@dataclass
+class AuditFinding:
+    """Result of one hardening check against a config."""
+
+    id: str
+    severity: str
+    description: str
+    remediation: str
+    passed: bool
+
+
+@dataclass
+class AuditReport:
+    """Outcome of auditing a server config for slow-HTTP hardening."""
+
+    server: str
+    total_checks: int
+    passed: int
+    findings: list[AuditFinding]
+
+    @property
+    def gaps(self) -> list[AuditFinding]:
+        return [f for f in self.findings if not f.passed]
+
+
+_NGINX_CHECKS = (
+    HardeningCheck(
+        "client_header_timeout",
+        r"client_header_timeout\s+\d",
+        "high",
+        "Header read timeout limits how long a client may dribble request headers.",
+        "Add `client_header_timeout 10s;` to the http block.",
+    ),
+    HardeningCheck(
+        "client_body_timeout",
+        r"client_body_timeout\s+\d",
+        "high",
+        "Body read timeout bounds slow request-body attacks.",
+        "Add `client_body_timeout 30s;`.",
+    ),
+    HardeningCheck(
+        "limit_conn",
+        r"limit_conn\s+\S+\s+\d",
+        "high",
+        "Per-IP connection cap blunts slowloris connection hoarding.",
+        "Define `limit_conn_zone` and add `limit_conn <zone> 20;`.",
+    ),
+    HardeningCheck(
+        "limit_req",
+        r"limit_req\s+zone=",
+        "medium",
+        "Per-IP request-rate limit throttles HTTP floods.",
+        "Define `limit_req_zone` and add `limit_req zone=<zone> burst=... nodelay;`.",
+    ),
+    HardeningCheck(
+        "send_timeout",
+        r"send_timeout\s+\d",
+        "medium",
+        "Send timeout drops clients that read responses too slowly.",
+        "Add `send_timeout 30s;`.",
+    ),
+    HardeningCheck(
+        "keepalive_timeout",
+        r"keepalive_timeout\s+\d",
+        "low",
+        "A short keep-alive timeout frees idle connections sooner.",
+        "Add `keepalive_timeout 15s;`.",
+    ),
+)
+
+_APACHE_CHECKS = (
+    HardeningCheck(
+        "reqtimeout",
+        r"RequestReadTimeout",
+        "high",
+        "mod_reqtimeout bounds how long headers/body may take to arrive.",
+        "Enable mod_reqtimeout and set `RequestReadTimeout header=10-20,minrate=500`.",
+    ),
+    HardeningCheck(
+        "conn_per_ip",
+        r"QS_SrvMaxConnPerIP|MaxConnPerIP",
+        "high",
+        "Per-IP connection cap (mod_qos / mod_limitipconn) blunts connection hoarding.",
+        "Enable mod_qos and set `QS_SrvMaxConnPerIP 20`.",
+    ),
+    HardeningCheck(
+        "timeout",
+        r"^\s*Timeout\s+\d",
+        "medium",
+        "The global Timeout bounds slow request/response phases.",
+        "Set `Timeout 30`.",
+    ),
+    HardeningCheck(
+        "keepalive_timeout",
+        r"KeepAliveTimeout\s+\d",
+        "low",
+        "A short KeepAliveTimeout frees idle connections sooner.",
+        "Set `KeepAliveTimeout 15`.",
+    ),
+)
+
+_HAPROXY_CHECKS = (
+    HardeningCheck(
+        "timeout_http_request",
+        r"timeout\s+http-request",
+        "high",
+        "`timeout http-request` caps how long the full request may take to arrive.",
+        "Add `timeout http-request 10s` to defaults/frontend.",
+    ),
+    HardeningCheck(
+        "conn_limit",
+        r"sc0_conn_cur|maxconn\s+\d",
+        "high",
+        "A per-IP stick-table connection limit (or maxconn) caps concurrency.",
+        "Track src in a stick-table and reject when `sc0_conn_cur` exceeds a cap.",
+    ),
+    HardeningCheck(
+        "timeout_client",
+        r"timeout\s+client",
+        "medium",
+        "`timeout client` drops idle/slow client connections.",
+        "Add `timeout client 30s`.",
+    ),
+    HardeningCheck(
+        "timeout_keep_alive",
+        r"timeout\s+http-keep-alive",
+        "low",
+        "A short keep-alive timeout frees idle connections sooner.",
+        "Add `timeout http-keep-alive 15s`.",
+    ),
+)
+
+_AUDIT_CHECKS = {
+    "nginx": _NGINX_CHECKS,
+    "apache": _APACHE_CHECKS,
+    "haproxy": _HAPROXY_CHECKS,
+}
+
+
+def audit_config(server: str, config_text: str) -> AuditReport:
+    """Check an existing server config for slow-HTTP hardening gaps."""
+    try:
+        checks = _AUDIT_CHECKS[server]
+    except KeyError:
+        raise ValueError(
+            f"unsupported server {server!r}; choose from {list(_AUDIT_CHECKS)}"
+        ) from None
+
+    findings = [
+        AuditFinding(
+            id=c.id,
+            severity=c.severity,
+            description=c.description,
+            remediation=c.remediation,
+            passed=re.search(c.pattern, config_text, re.IGNORECASE | re.MULTILINE) is not None,
+        )
+        for c in checks
+    ]
+    passed = sum(1 for f in findings if f.passed)
+    return AuditReport(
+        server=server,
+        total_checks=len(findings),
+        passed=passed,
+        findings=findings,
+    )
+
+
+def audit_report_to_dict(report: AuditReport) -> dict[str, object]:
+    """Serialise an ``AuditReport`` to plain JSON-compatible data."""
+    return {
+        "server": report.server,
+        "total_checks": report.total_checks,
+        "passed": report.passed,
+        "gaps": len(report.gaps),
+        "findings": [asdict(f) for f in report.findings],
+    }
+
+
+def audit_has_gap_at_or_above(report: AuditReport, min_severity: str) -> bool:
+    """True if any failing check is at least ``min_severity`` severe."""
+    threshold = _SEVERITY_RANK[min_severity]
+    return any(_SEVERITY_RANK.get(f.severity, 0) >= threshold for f in report.gaps)
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -1119,6 +1322,49 @@ def harden_net_cmd(
         log.info("wrote network mitigation config", target=target, output=output_path)
     else:
         click.echo(config)
+
+
+@cli.command("audit")
+@click.argument("server", type=click.Choice(SUPPORTED_SERVERS))
+@click.argument("config_file", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--report",
+    "report_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write the JSON audit report to this path (default: stdout)",
+)
+@click.option(
+    "--fail-severity",
+    type=click.Choice(["low", "medium", "high"]),
+    default="high",
+    show_default=True,
+    help="Exit non-zero if any gap is at least this severe",
+)
+def audit_cmd(
+    server: str,
+    config_file: str,
+    report_path: str | None,
+    fail_severity: str,
+) -> None:
+    """Audit an existing SERVER CONFIG_FILE for slow-HTTP hardening gaps."""
+    report = audit_config(server, Path(config_file).read_text())
+    payload = json.dumps(audit_report_to_dict(report), indent=2)
+
+    if report_path:
+        Path(report_path).write_text(payload + "\n")
+        log.info(
+            "audit complete",
+            server=server,
+            passed=report.passed,
+            gaps=len(report.gaps),
+            report=report_path,
+        )
+    else:
+        click.echo(payload)
+
+    if audit_has_gap_at_or_above(report, fail_severity):
+        raise SystemExit(1)
 
 
 def main() -> None:

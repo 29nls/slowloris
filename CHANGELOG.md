@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `slowloris_defense_attack_detected`, `slowloris_defense_ip_score`,
   `slowloris_defense_flood_by_type`, `slowloris_defense_flood_max_bps`). Public
   `render_detection_html/prometheus` and `render_flood_html/prometheus` helpers.
+- **Config audit (`audit`).** Checks an existing nginx/Apache/HAProxy config
+  file for the hardening directives that matter against slow-HTTP attacks
+  (read timeouts, per-IP connection caps, request-rate limits, keep-alive
+  bounds), reporting each gap with severity and remediation. Exits non-zero
+  when a gap is at least `--fail-severity` (default `high`); `harden <server>`
+  output is guaranteed to pass its own audit.
 
 ## [0.6.0]
 
