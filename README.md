@@ -118,7 +118,7 @@ slowloris example.com --sleeptime 20 --jitter 5
 - **Class-based architecture**: Clean OOP design without global state
 - **No monkey-patching**: Proper async/await methods throughout
 - **Type hints**: Full type annotation support
-- **Modern user agents**: Updated 2024 browser user-agent strings
+- **Modern user agents**: Updated 2026 browser user-agent strings
 - **IPv6 support**: Automatic IPv4/IPv6 detection via getaddrinfo
 - **HTTPS/TLS 1.3**: Full TLS support with secure ciphers
 - **Signal handling**: Graceful shutdown on Ctrl+C with cleanup
@@ -131,12 +131,12 @@ slowloris example.com --sleeptime 20 --jitter 5
 
 - **Python**: 3.8 or higher
 - **Core dependencies**:
-  - `click` >= 8.0.0 (CLI framework)
-  - `structlog` >= 23.0.0 (Structured logging)
-  - `tenacity` >= 8.0.0 (Retry logic)
+  - `click` >= 8.1.8 (CLI framework)
+  - `structlog` >= 25.4.0 (Structured logging)
+  - `tenacity` >= 9.0.0 (Retry logic)
 
 **Optional dependencies**:
-- `python-socks` >= 1.2.0 (For SOCKS5 proxy support)
+- `python-socks` >= 2.5.0 (For SOCKS5 proxy support)
 
 All dependencies are automatically installed via pip.
 
