@@ -111,10 +111,34 @@ slowloris example.com --sleeptime 20 --jitter 5
 | `--sleeptime` | - | float | 15.0 | Seconds between keep-alive headers |
 | `--jitter` | - | float | 3.0 | Random jitter for sleep time (±seconds) |
 | `--connect-timeout` | - | float | 10.0 | Timeout for connecting and writing (seconds) |
+| `--benchmark` | - | flag | false | Resilience benchmark mode (ramp + report) |
+| `--levels` | - | string | 10,50,100,200 | Comma-separated concurrency levels for `--benchmark` |
+| `--step-duration` | - | float | 5.0 | Seconds to probe at each benchmark level |
+| `--fail-under` | - | float | 0.9 | Probe success-rate threshold for degradation |
+| `--report` | - | path | stdout | Write benchmark report as JSON to this path |
 | `--version` | - | - | - | Show version information |
 
-## Features (v0.3.2)
+## Resilience benchmark mode
 
+Instead of just flooding a target, `--benchmark` turns slowloris into a
+measurement tool for systems **you own or are authorized to test**. It ramps
+concurrency through `--levels`, holds partial connections at each level while
+sending legitimate probe requests, and records the point where the server
+starts refusing legitimate traffic.
+
+```bash
+slowloris 127.0.0.1 -p 8080 --benchmark \
+    --levels 10,50,100,200 --step-duration 5 \
+    --fail-under 0.9 --report report.json
+```
+
+The JSON report contains per-level probe success rate and latency plus
+`degraded_at` (the first level below `--fail-under`, or `null`). The process
+exits non-zero when degradation is detected, so it can gate a CI job.
+
+## Features (v0.4.0)
+
+- **Resilience benchmark**: `--benchmark` ramps load, probes with legitimate requests, and reports the degradation threshold (JSON + CI exit code)
 - **Asyncio-based**: Uses Python asyncio for maximum concurrent connections
 - **Non-blocking DNS**: Async name resolution via `loop.getaddrinfo` (never blocks the event loop)
 - **Connection/write timeouts**: Configurable `--connect-timeout` guards connects and writes

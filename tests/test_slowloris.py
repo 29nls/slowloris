@@ -13,7 +13,16 @@ import pytest
 from click.testing import CliRunner
 
 import slowloris
-from slowloris import USER_AGENTS, Config, Slowloris, main
+from slowloris import (
+    USER_AGENTS,
+    Benchmark,
+    Config,
+    Slowloris,
+    _parse_levels,
+    _summarize_level,
+    main,
+    probe,
+)
 
 
 class TestConfig:
@@ -174,3 +183,127 @@ class TestPackaging:
         match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
         assert match is not None
         assert match.group(1) == slowloris.__version__
+
+
+async def _start_http_server():
+    """Start a tiny HTTP server that answers complete requests with 200."""
+
+    async def handler(reader, writer):
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    return
+                if line in (b"\r\n", b"\n"):
+                    break
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            await writer.drain()
+        except (ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port
+
+
+class TestBenchmark:
+    def test_parse_levels_valid(self):
+        assert _parse_levels("10,50,100") == [10, 50, 100]
+        assert _parse_levels(" 5 , 20 ") == [5, 20]
+
+    @pytest.mark.parametrize("raw", ["10,abc", "0,5", "", "-3"])
+    def test_parse_levels_invalid(self, raw):
+        import click
+
+        with pytest.raises(click.BadParameter):
+            _parse_levels(raw)
+
+    def test_summarize_level(self):
+        s = _summarize_level(50, [(True, 0.01), (True, 0.03), (False, 0.5)])
+        assert s["sockets"] == 50
+        assert s["probes"] == 3
+        assert s["probe_successes"] == 2
+        assert s["success_rate"] == round(2 / 3, 4)
+        assert s["avg_latency_ms"] == round(0.02 * 1000, 2)
+        assert s["max_latency_ms"] == 30.0
+
+    def test_summarize_level_empty(self):
+        s = _summarize_level(1, [])
+        assert s["success_rate"] == 0.0
+        assert s["avg_latency_ms"] is None
+        assert s["max_latency_ms"] is None
+
+    @pytest.mark.parametrize(
+        ("levels", "fail_under"),
+        [([], 0.9), ([0], 0.9), ([1], 1.5), ([1], -0.1)],
+    )
+    def test_benchmark_validation(self, levels, fail_under):
+        with pytest.raises(ValueError):
+            Benchmark(Config(host="x"), levels, fail_under=fail_under)
+
+    def test_probe_and_benchmark_end_to_end(self):
+        asyncio.run(self._e2e())
+
+    async def _e2e(self):
+        server, port = await _start_http_server()
+        try:
+            ok, latency = await probe("127.0.0.1", port, timeout=5)
+            assert ok is True
+            assert latency >= 0
+
+            config = Config(
+                host="127.0.0.1",
+                port=port,
+                sleeptime=1,
+                jitter=0,
+                connect_timeout=5,
+            )
+            bench = Benchmark(
+                config,
+                [2, 3],
+                step_duration=1.0,
+                probe_interval=0.2,
+                warmup=0.3,
+                fail_under=0.9,
+            )
+            report = await bench.run()
+            assert report["degraded_at"] is None
+            assert report["target"]["port"] == port
+            assert [lvl["sockets"] for lvl in report["levels"]] == [2, 3]
+            assert all(lvl["success_rate"] == 1.0 for lvl in report["levels"])
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    def test_probe_failure_on_closed_port(self):
+        ok, latency = asyncio.run(probe("127.0.0.1", 1, timeout=1))
+        assert ok is False
+        assert latency >= 0
+
+
+class TestBenchmarkCLI:
+    def test_benchmark_success_exit_code(self, monkeypatch):
+        async def fake(config, levels, step_duration, fail_under, report_path):
+            return 0
+
+        monkeypatch.setattr(slowloris, "_run_benchmark", fake)
+        result = CliRunner().invoke(main, ["example.com", "--benchmark", "--levels", "2,4"])
+        assert result.exit_code == 0
+
+    def test_benchmark_degraded_exit_code(self, monkeypatch):
+        async def fake(config, levels, step_duration, fail_under, report_path):
+            return 1
+
+        monkeypatch.setattr(slowloris, "_run_benchmark", fake)
+        result = CliRunner().invoke(main, ["example.com", "--benchmark"])
+        assert result.exit_code == 1
+
+    def test_benchmark_bad_levels_exit_code(self, monkeypatch):
+        async def fake(config, levels, step_duration, fail_under, report_path):
+            return 0
+
+        monkeypatch.setattr(slowloris, "_run_benchmark", fake)
+        result = CliRunner().invoke(main, ["example.com", "--benchmark", "--levels", "0"])
+        assert result.exit_code == 2

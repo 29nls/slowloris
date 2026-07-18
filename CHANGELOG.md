@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0]
+
+### Added
+- **Resilience benchmark mode (`--benchmark`)**: ramps concurrency through `--levels`, holds partial connections at each level while sending legitimate probe requests, and measures probe success rate + latency. Reports the level where the success rate drops below `--fail-under` (`degraded_at`).
+- `--report` writes a structured JSON report (per-level metrics + target + threshold); prints to stdout otherwise.
+- Benchmark exits non-zero when degradation is detected, so it can gate CI/authorized resilience tests.
+- Public `probe()` helper and `Benchmark` runner; `Slowloris.start_workers()` / `stop_and_join()` extracted for reuse.
+
 ## [0.3.2]
 
 ### Fixed
