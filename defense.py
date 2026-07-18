@@ -845,26 +845,54 @@ def render_flood_html(report: FloodReport) -> str:
 _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
+_DURATION_UNITS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+def _parse_duration(token: str, unit_default: str) -> float | None:
+    """Parse a directive time token (e.g. ``10s``, ``500ms``, ``30``) to seconds."""
+    match = re.fullmatch(r"(\d+)(ms|s|m|h|d)?", token.strip())
+    if not match:
+        return None
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2) or unit_default]
+
+
 @dataclass(frozen=True)
 class HardeningCheck:
-    """A single directive we expect to see in a hardened server config."""
+    """A single directive we expect to see in a hardened server config.
+
+    ``pattern`` decides presence. When ``value_pattern`` is set its first capture
+    group is parsed and compared against ``max_value``: a present directive whose
+    value exceeds the bound is reported as ``weak`` rather than ``ok``.
+    """
 
     id: str
     pattern: str
     severity: str
     description: str
     remediation: str
+    value_pattern: str | None = None
+    value_kind: str | None = None  # "duration" | "count"
+    max_value: float | None = None
+    duration_unit_default: str = "s"
+    weak_remediation: str | None = None
 
 
 @dataclass
 class AuditFinding:
-    """Result of one hardening check against a config."""
+    """Result of one hardening check against a config.
+
+    ``status`` is ``ok`` (present and adequate), ``missing`` (directive absent),
+    or ``weak`` (present but the value is too permissive). ``passed`` is a
+    convenience alias for ``status == "ok"``.
+    """
 
     id: str
     severity: str
     description: str
     remediation: str
     passed: bool
+    status: str
+    observed: str | None = None
 
 
 @dataclass
@@ -880,6 +908,14 @@ class AuditReport:
     def gaps(self) -> list[AuditFinding]:
         return [f for f in self.findings if not f.passed]
 
+    @property
+    def missing(self) -> list[AuditFinding]:
+        return [f for f in self.findings if f.status == "missing"]
+
+    @property
+    def weak(self) -> list[AuditFinding]:
+        return [f for f in self.findings if f.status == "weak"]
+
 
 _NGINX_CHECKS = (
     HardeningCheck(
@@ -888,6 +924,10 @@ _NGINX_CHECKS = (
         "high",
         "Header read timeout limits how long a client may dribble request headers.",
         "Add `client_header_timeout 10s;` to the http block.",
+        value_pattern=r"client_header_timeout\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=30.0,
+        weak_remediation="Lower `client_header_timeout` to <=30s (e.g. 10s).",
     ),
     HardeningCheck(
         "client_body_timeout",
@@ -895,6 +935,10 @@ _NGINX_CHECKS = (
         "high",
         "Body read timeout bounds slow request-body attacks.",
         "Add `client_body_timeout 30s;`.",
+        value_pattern=r"client_body_timeout\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=60.0,
+        weak_remediation="Lower `client_body_timeout` to <=60s (e.g. 30s).",
     ),
     HardeningCheck(
         "limit_conn",
@@ -902,6 +946,10 @@ _NGINX_CHECKS = (
         "high",
         "Per-IP connection cap blunts slowloris connection hoarding.",
         "Define `limit_conn_zone` and add `limit_conn <zone> 20;`.",
+        value_pattern=r"limit_conn\s+\S+\s+(\d+)",
+        value_kind="count",
+        max_value=100.0,
+        weak_remediation="Lower the `limit_conn` per-IP cap to <=100 (e.g. 20).",
     ),
     HardeningCheck(
         "limit_req",
@@ -916,6 +964,10 @@ _NGINX_CHECKS = (
         "medium",
         "Send timeout drops clients that read responses too slowly.",
         "Add `send_timeout 30s;`.",
+        value_pattern=r"send_timeout\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=60.0,
+        weak_remediation="Lower `send_timeout` to <=60s (e.g. 30s).",
     ),
     HardeningCheck(
         "keepalive_timeout",
@@ -923,6 +975,10 @@ _NGINX_CHECKS = (
         "low",
         "A short keep-alive timeout frees idle connections sooner.",
         "Add `keepalive_timeout 15s;`.",
+        value_pattern=r"keepalive_timeout\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=65.0,
+        weak_remediation="Lower `keepalive_timeout` to <=65s (e.g. 15s).",
     ),
 )
 
@@ -940,6 +996,10 @@ _APACHE_CHECKS = (
         "high",
         "Per-IP connection cap (mod_qos / mod_limitipconn) blunts connection hoarding.",
         "Enable mod_qos and set `QS_SrvMaxConnPerIP 20`.",
+        value_pattern=r"(?:QS_SrvMaxConnPerIP|MaxConnPerIP)\s+(\d+)",
+        value_kind="count",
+        max_value=100.0,
+        weak_remediation="Lower the per-IP connection cap to <=100 (e.g. 20).",
     ),
     HardeningCheck(
         "timeout",
@@ -947,6 +1007,10 @@ _APACHE_CHECKS = (
         "medium",
         "The global Timeout bounds slow request/response phases.",
         "Set `Timeout 30`.",
+        value_pattern=r"^\s*Timeout\s+(\d+)",
+        value_kind="duration",
+        max_value=60.0,
+        weak_remediation="Lower `Timeout` to <=60 seconds (e.g. 30).",
     ),
     HardeningCheck(
         "keepalive_timeout",
@@ -954,6 +1018,10 @@ _APACHE_CHECKS = (
         "low",
         "A short KeepAliveTimeout frees idle connections sooner.",
         "Set `KeepAliveTimeout 15`.",
+        value_pattern=r"KeepAliveTimeout\s+(\d+)",
+        value_kind="duration",
+        max_value=65.0,
+        weak_remediation="Lower `KeepAliveTimeout` to <=65 seconds (e.g. 15).",
     ),
 )
 
@@ -964,6 +1032,11 @@ _HAPROXY_CHECKS = (
         "high",
         "`timeout http-request` caps how long the full request may take to arrive.",
         "Add `timeout http-request 10s` to defaults/frontend.",
+        value_pattern=r"timeout\s+http-request\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=30.0,
+        duration_unit_default="ms",
+        weak_remediation="Lower `timeout http-request` to <=30s (e.g. 10s).",
     ),
     HardeningCheck(
         "conn_limit",
@@ -978,6 +1051,11 @@ _HAPROXY_CHECKS = (
         "medium",
         "`timeout client` drops idle/slow client connections.",
         "Add `timeout client 30s`.",
+        value_pattern=r"timeout\s+client\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=60.0,
+        duration_unit_default="ms",
+        weak_remediation="Lower `timeout client` to <=60s (e.g. 30s).",
     ),
     HardeningCheck(
         "timeout_keep_alive",
@@ -985,6 +1063,11 @@ _HAPROXY_CHECKS = (
         "low",
         "A short keep-alive timeout frees idle connections sooner.",
         "Add `timeout http-keep-alive 15s`.",
+        value_pattern=r"timeout\s+http-keep-alive\s+(\d+(?:ms|s|m|h)?)",
+        value_kind="duration",
+        max_value=65.0,
+        duration_unit_default="ms",
+        weak_remediation="Lower `timeout http-keep-alive` to <=65s (e.g. 15s).",
     ),
 )
 
@@ -993,6 +1076,40 @@ _AUDIT_CHECKS = {
     "apache": _APACHE_CHECKS,
     "haproxy": _HAPROXY_CHECKS,
 }
+
+
+_AUDIT_FLAGS = re.IGNORECASE | re.MULTILINE
+
+
+def _evaluate_check(check: HardeningCheck, config_text: str) -> AuditFinding:
+    status = "ok"
+    observed: str | None = None
+    remediation = check.remediation
+
+    if re.search(check.pattern, config_text, _AUDIT_FLAGS) is None:
+        status = "missing"
+    elif check.value_pattern is not None and check.max_value is not None:
+        match = re.search(check.value_pattern, config_text, _AUDIT_FLAGS)
+        if match is not None:
+            token = match.group(1)
+            if check.value_kind == "duration":
+                value = _parse_duration(token, check.duration_unit_default)
+            else:
+                value = float(token)
+            if value is not None and value > check.max_value:
+                status = "weak"
+                observed = token
+                remediation = check.weak_remediation or check.remediation
+
+    return AuditFinding(
+        id=check.id,
+        severity=check.severity,
+        description=check.description,
+        remediation=remediation,
+        passed=status == "ok",
+        status=status,
+        observed=observed,
+    )
 
 
 def audit_config(server: str, config_text: str) -> AuditReport:
@@ -1004,16 +1121,7 @@ def audit_config(server: str, config_text: str) -> AuditReport:
             f"unsupported server {server!r}; choose from {list(_AUDIT_CHECKS)}"
         ) from None
 
-    findings = [
-        AuditFinding(
-            id=c.id,
-            severity=c.severity,
-            description=c.description,
-            remediation=c.remediation,
-            passed=re.search(c.pattern, config_text, re.IGNORECASE | re.MULTILINE) is not None,
-        )
-        for c in checks
-    ]
+    findings = [_evaluate_check(c, config_text) for c in checks]
     passed = sum(1 for f in findings if f.passed)
     return AuditReport(
         server=server,
@@ -1030,6 +1138,8 @@ def audit_report_to_dict(report: AuditReport) -> dict[str, object]:
         "total_checks": report.total_checks,
         "passed": report.passed,
         "gaps": len(report.gaps),
+        "missing": len(report.missing),
+        "weak": len(report.weak),
         "findings": [asdict(f) for f in report.findings],
     }
 
