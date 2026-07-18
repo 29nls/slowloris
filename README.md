@@ -1,5 +1,7 @@
 # slowloris.py - Low Bandwidth HTTP Denial of Service Tool
 
+[![CI](https://github.com/29nls/slowloris/actions/workflows/ci.yml/badge.svg)](https://github.com/29nls/slowloris/actions/workflows/ci.yml)
+
 ## What is Slowloris?
 
 Slowloris is an HTTP Denial of Service attack tool that affects threaded servers. It works by:
@@ -13,7 +15,7 @@ This technique is particularly effective against servers with limited thread poo
 
 ## Security Disclaimer
 
-**For authorized penetration testing and educational purposes only.** 
+**For authorized penetration testing and educational purposes only.**
 
 Always ensure you have explicit written permission before testing any system you do not own. Unauthorized DoS attacks are illegal and unethical.
 
@@ -139,6 +141,29 @@ slowloris example.com --sleeptime 20 --jitter 5
 - `python-socks` >= 2.5.0 (For SOCKS5 proxy support)
 
 All dependencies are automatically installed via pip.
+
+## Development
+
+Install with the development extras and run the checks:
+
+```bash
+git clone https://github.com/29nls/slowloris.git
+cd slowloris
+pip install -e ".[proxy,dev]"
+
+# Lint, format, type-check and test
+ruff check .
+ruff format --check .
+mypy slowloris.py
+pytest -q
+```
+
+Pre-commit hooks run Ruff (lint + format) automatically on commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
 
 ## License
 

