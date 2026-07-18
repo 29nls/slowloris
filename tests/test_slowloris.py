@@ -50,9 +50,17 @@ class TestConfig:
         assert d["port"] == 443
         assert d["https"] is True
         assert set(d) == {
-            "host", "port", "sockets", "verbose", "randuseragent",
-            "useproxy", "proxy_host", "proxy_port", "https",
-            "sleeptime", "jitter",
+            "host",
+            "port",
+            "sockets",
+            "verbose",
+            "randuseragent",
+            "useproxy",
+            "proxy_host",
+            "proxy_port",
+            "https",
+            "sleeptime",
+            "jitter",
         }
 
     def test_frozen(self):
