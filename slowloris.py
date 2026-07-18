@@ -43,7 +43,7 @@ from tenacity import (
     wait_exponential,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # Configure structlog with console output
 structlog.configure(
@@ -423,6 +423,39 @@ def _summarize_level(level: int, results: list[tuple[bool, float]]) -> dict[str,
     }
 
 
+async def _measure_level(
+    config: Config,
+    level: int,
+    *,
+    step_duration: float,
+    probe_interval: float,
+    warmup: float,
+) -> dict[str, object]:
+    """Hold ``level`` partial connections and probe the target, returning stats."""
+    engine = Slowloris(replace(config, sockets=level))
+    engine.start_workers(level)
+    try:
+        await asyncio.sleep(warmup)
+        results: list[tuple[bool, float]] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + step_duration
+        while loop.time() < deadline:
+            results.append(
+                await probe(
+                    config.host,
+                    config.port,
+                    https=config.https,
+                    timeout=config.connect_timeout,
+                )
+            )
+            await asyncio.sleep(probe_interval)
+    finally:
+        await engine.stop_and_join()
+    summary = _summarize_level(level, results)
+    summary["connections_created"] = engine.connections_created
+    return summary
+
+
 class Benchmark:
     """Resilience benchmark: ramp concurrency and measure server degradation.
 
@@ -457,28 +490,13 @@ class Benchmark:
         self.fail_under = fail_under
 
     async def _run_level(self, level: int) -> dict[str, object]:
-        engine = Slowloris(replace(self.config, sockets=level))
-        engine.start_workers(level)
-        try:
-            await asyncio.sleep(self.warmup)
-            results: list[tuple[bool, float]] = []
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + self.step_duration
-            while loop.time() < deadline:
-                results.append(
-                    await probe(
-                        self.config.host,
-                        self.config.port,
-                        https=self.config.https,
-                        timeout=self.config.connect_timeout,
-                    )
-                )
-                await asyncio.sleep(self.probe_interval)
-        finally:
-            await engine.stop_and_join()
-        summary = _summarize_level(level, results)
-        summary["connections_created"] = engine.connections_created
-        return summary
+        return await _measure_level(
+            self.config,
+            level,
+            step_duration=self.step_duration,
+            probe_interval=self.probe_interval,
+            warmup=self.warmup,
+        )
 
     async def run(self) -> dict[str, object]:
         """Run all levels and return a structured report."""
@@ -510,6 +528,115 @@ class Benchmark:
         }
 
 
+class AdaptiveBenchmark:
+    """Closed-loop search for a server's critical concurrency threshold.
+
+    Rather than probing a fixed list of levels, this reacts to the server's
+    responsiveness: it grows concurrency exponentially until legitimate probes
+    start failing (success rate below ``fail_under``), then binary-searches the
+    bracket to converge on the highest number of held connections the server
+    still tolerates, using far fewer trials than a dense static ramp.
+    Intended for testing systems you own or are authorized to test.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        start: int = 10,
+        max_sockets: int = 1000,
+        tolerance: int = 5,
+        step_duration: float = 5.0,
+        probe_interval: float = 0.5,
+        warmup: float = 1.0,
+        fail_under: float = 0.9,
+    ) -> None:
+        if start < 1:
+            raise ValueError("start must be >= 1")
+        if max_sockets < start:
+            raise ValueError("max_sockets must be >= start")
+        if tolerance < 1:
+            raise ValueError("tolerance must be >= 1")
+        if not 0.0 <= fail_under <= 1.0:
+            raise ValueError("fail_under must be between 0.0 and 1.0")
+        self.config = config
+        self.start = start
+        self.max_sockets = max_sockets
+        self.tolerance = tolerance
+        self.step_duration = step_duration
+        self.probe_interval = probe_interval
+        self.warmup = warmup
+        self.fail_under = fail_under
+
+    async def _evaluate(self, level: int, trials: list[dict[str, object]]) -> bool:
+        summary = await _measure_level(
+            self.config,
+            level,
+            step_duration=self.step_duration,
+            probe_interval=self.probe_interval,
+            warmup=self.warmup,
+        )
+        trials.append(summary)
+        success_rate = summary["success_rate"]
+        assert isinstance(success_rate, float)
+        healthy = success_rate >= self.fail_under
+        log.info(
+            "Adaptive trial",
+            sockets=level,
+            success_rate=success_rate,
+            healthy=healthy,
+        )
+        return healthy
+
+    async def run(self) -> dict[str, object]:
+        """Search for the critical threshold and return a structured report."""
+        trials: list[dict[str, object]] = []
+
+        # Phase 1: exponential ramp to bracket the threshold.
+        last_healthy = 0
+        first_degraded: int | None = None
+        level = self.start
+        while True:
+            healthy = await self._evaluate(level, trials)
+            if healthy:
+                last_healthy = level
+                if level >= self.max_sockets:
+                    break
+                level = min(level * 2, self.max_sockets)
+            else:
+                first_degraded = level
+                break
+
+        converged = first_degraded is not None
+        # Phase 2: binary search within [last_healthy, first_degraded].
+        if first_degraded is not None:
+            lo, hi = last_healthy, first_degraded
+            while hi - lo > self.tolerance:
+                mid = (lo + hi) // 2
+                if mid == lo:
+                    break
+                if await self._evaluate(mid, trials):
+                    lo = mid
+                else:
+                    hi = mid
+            last_healthy = lo
+
+        return {
+            "target": {
+                "host": self.config.host,
+                "port": self.config.port,
+                "https": self.config.https,
+            },
+            "fail_under": self.fail_under,
+            "tolerance": self.tolerance,
+            "max_sockets": self.max_sockets,
+            "critical_sockets": last_healthy,
+            "first_degraded_at": first_degraded,
+            "converged": converged,
+            "trials": trials,
+        }
+
+
 def _parse_levels(raw: str) -> list[int]:
     """Parse a comma-separated list of concurrency levels."""
     try:
@@ -521,6 +648,16 @@ def _parse_levels(raw: str) -> list[int]:
     if any(level < 1 for level in levels):
         raise click.BadParameter("Levels must be >= 1")
     return levels
+
+
+def _emit_report(report: dict[str, object], report_path: str | None) -> None:
+    """Write a report to disk as JSON, or print it to stdout."""
+    if report_path:
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        log.info("Report written", path=report_path)
+    else:
+        click.echo(json.dumps(report, indent=2))
 
 
 async def _run_benchmark(
@@ -538,17 +675,46 @@ async def _run_benchmark(
         fail_under=fail_under,
     )
     report = await benchmark.run()
-
-    if report_path:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(report, handle, indent=2)
-        log.info("Report written", path=report_path)
-    else:
-        click.echo(json.dumps(report, indent=2))
+    _emit_report(report, report_path)
 
     degraded_at = report["degraded_at"]
     if degraded_at is not None:
         log.info("Degradation detected", degraded_at=degraded_at)
+        return 1
+    return 0
+
+
+async def _run_adaptive(
+    config: Config,
+    start: int,
+    max_sockets: int,
+    tolerance: int,
+    step_duration: float,
+    fail_under: float,
+    min_capacity: int | None,
+    report_path: str | None,
+) -> int:
+    """Run an adaptive threshold search and return a process exit code."""
+    adaptive = AdaptiveBenchmark(
+        config,
+        start=start,
+        max_sockets=max_sockets,
+        tolerance=tolerance,
+        step_duration=step_duration,
+        fail_under=fail_under,
+    )
+    report = await adaptive.run()
+    _emit_report(report, report_path)
+
+    critical = report["critical_sockets"]
+    assert isinstance(critical, int)
+    log.info("Critical threshold", critical_sockets=critical)
+    if min_capacity is not None and critical < min_capacity:
+        log.info(
+            "Capacity below requirement",
+            critical_sockets=critical,
+            min_capacity=min_capacity,
+        )
         return 1
     return 0
 
@@ -668,6 +834,35 @@ async def _run_attack(config: Config) -> None:
     help="Probe success-rate threshold for degradation in --benchmark (default: 0.9)",
 )
 @click.option(
+    "--adaptive",
+    is_flag=True,
+    help="Adaptive mode: closed-loop search for the critical concurrency threshold",
+)
+@click.option(
+    "--start",
+    default=10,
+    type=int,
+    help="Starting concurrency for --adaptive search (default: 10)",
+)
+@click.option(
+    "--max-sockets",
+    default=1000,
+    type=int,
+    help="Upper bound on concurrency for --adaptive search (default: 1000)",
+)
+@click.option(
+    "--tolerance",
+    default=5,
+    type=int,
+    help="Stop --adaptive search when the bracket is within this many sockets (default: 5)",
+)
+@click.option(
+    "--min-capacity",
+    default=None,
+    type=int,
+    help="Fail (exit 1) if --adaptive critical threshold is below this value",
+)
+@click.option(
     "--report",
     "report_path",
     default=None,
@@ -692,6 +887,11 @@ def main(
     levels: str,
     step_duration: float,
     fail_under: float,
+    adaptive: bool,
+    start: int,
+    max_sockets: int,
+    tolerance: int,
+    min_capacity: int | None,
     report_path: str | None,
 ) -> None:
     """Slowloris - Low bandwidth stress test tool for websites."""
@@ -730,6 +930,31 @@ def main(
             err=True,
         )
         sys.exit(1)
+
+    if adaptive:
+        if start < 1:
+            raise click.BadParameter("--start must be >= 1")
+        if max_sockets < start:
+            raise click.BadParameter("--max-sockets must be >= --start")
+        if tolerance < 1:
+            raise click.BadParameter("--tolerance must be >= 1")
+        try:
+            exit_code = asyncio.run(
+                _run_adaptive(
+                    config,
+                    start,
+                    max_sockets,
+                    tolerance,
+                    step_duration,
+                    fail_under,
+                    min_capacity,
+                    report_path,
+                )
+            )
+        except KeyboardInterrupt:
+            log.info("Interrupted, shutting down")
+            exit_code = 130
+        sys.exit(exit_code)
 
     if benchmark:
         parsed_levels = _parse_levels(levels)

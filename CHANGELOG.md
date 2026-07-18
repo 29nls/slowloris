@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0]
+
+### Added
+- **Adaptive benchmark mode (`--adaptive`)**: closed-loop search for a target's critical concurrency threshold. Grows concurrency exponentially until legitimate probes start failing, then binary-searches the bracket to converge (within `--tolerance` sockets) on the highest number of held connections the server still tolerates — far fewer trials than a dense static ramp.
+- Options `--start`, `--max-sockets`, `--tolerance`, and `--min-capacity` (exit non-zero when the measured threshold is below a required capacity, for CI gating).
+- Report includes `critical_sockets`, `first_degraded_at`, `converged`, and per-trial metrics.
+- Public `AdaptiveBenchmark` class; shared `_measure_level` helper reused by both benchmark modes.
+
 ## [0.4.0]
 
 ### Added

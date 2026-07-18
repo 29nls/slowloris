@@ -15,6 +15,7 @@ from click.testing import CliRunner
 import slowloris
 from slowloris import (
     USER_AGENTS,
+    AdaptiveBenchmark,
     Benchmark,
     Config,
     Slowloris,
@@ -306,4 +307,112 @@ class TestBenchmarkCLI:
 
         monkeypatch.setattr(slowloris, "_run_benchmark", fake)
         result = CliRunner().invoke(main, ["example.com", "--benchmark", "--levels", "0"])
+        assert result.exit_code == 2
+
+
+def _fake_measure_factory(threshold):
+    """Return a fake _measure_level where levels <= threshold stay healthy."""
+
+    async def fake_measure(config, level, *, step_duration, probe_interval, warmup):
+        ok = level <= threshold
+        return {
+            "sockets": level,
+            "probes": 1,
+            "probe_successes": int(ok),
+            "success_rate": 1.0 if ok else 0.0,
+            "avg_latency_ms": 1.0,
+            "max_latency_ms": 1.0,
+            "connections_created": level,
+        }
+
+    return fake_measure
+
+
+class TestAdaptiveBenchmark:
+    @pytest.mark.parametrize(
+        ("kwargs"),
+        [
+            {"start": 0},
+            {"start": 10, "max_sockets": 5},
+            {"tolerance": 0},
+            {"fail_under": 1.5},
+        ],
+    )
+    def test_validation(self, kwargs):
+        with pytest.raises(ValueError):
+            AdaptiveBenchmark(Config(host="x"), **kwargs)
+
+    def test_converges_on_threshold(self, monkeypatch):
+        monkeypatch.setattr(slowloris, "_measure_level", _fake_measure_factory(37))
+        adaptive = AdaptiveBenchmark(
+            Config(host="x"),
+            start=1,
+            max_sockets=1000,
+            tolerance=1,
+            fail_under=0.9,
+        )
+        report = asyncio.run(adaptive.run())
+        assert report["converged"] is True
+        assert report["critical_sockets"] == 37
+        assert report["first_degraded_at"] is not None
+        # Search is efficient: far fewer trials than a dense 1..1000 ramp.
+        assert len(report["trials"]) < 30
+
+    def test_never_degrades_within_bounds(self, monkeypatch):
+        monkeypatch.setattr(slowloris, "_measure_level", _fake_measure_factory(10_000))
+        adaptive = AdaptiveBenchmark(
+            Config(host="x"),
+            start=2,
+            max_sockets=8,
+            tolerance=1,
+        )
+        report = asyncio.run(adaptive.run())
+        assert report["converged"] is False
+        assert report["first_degraded_at"] is None
+        assert report["critical_sockets"] == 8
+
+
+class TestAdaptiveCLI:
+    def test_adaptive_success_exit_code(self, monkeypatch):
+        async def fake(
+            config,
+            start,
+            max_sockets,
+            tolerance,
+            step_duration,
+            fail_under,
+            min_capacity,
+            report_path,
+        ):
+            return 0
+
+        monkeypatch.setattr(slowloris, "_run_adaptive", fake)
+        result = CliRunner().invoke(main, ["example.com", "--adaptive"])
+        assert result.exit_code == 0
+
+    def test_adaptive_below_capacity_exit_code(self, monkeypatch):
+        async def fake(
+            config,
+            start,
+            max_sockets,
+            tolerance,
+            step_duration,
+            fail_under,
+            min_capacity,
+            report_path,
+        ):
+            return 1
+
+        monkeypatch.setattr(slowloris, "_run_adaptive", fake)
+        result = CliRunner().invoke(main, ["example.com", "--adaptive", "--min-capacity", "500"])
+        assert result.exit_code == 1
+
+    def test_adaptive_bad_bounds_exit_code(self, monkeypatch):
+        async def fake(*args, **kwargs):
+            return 0
+
+        monkeypatch.setattr(slowloris, "_run_adaptive", fake)
+        result = CliRunner().invoke(
+            main, ["example.com", "--adaptive", "--start", "100", "--max-sockets", "10"]
+        )
         assert result.exit_code == 2
