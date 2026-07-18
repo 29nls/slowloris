@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds), reporting each gap with severity and remediation. Exits non-zero
   when a gap is at least `--fail-severity` (default `high`); `harden <server>`
   output is guaranteed to pass its own audit.
+- **Audit value validation.** `audit` now also validates directive values, not
+  just presence: findings gain a `status` (`ok`/`missing`/`weak`) and `observed`
+  value. Oversized timeouts (with unit parsing — `10s`, `500ms`, `2m`; bare
+  HAProxy numbers read as milliseconds) and overly high per-IP connection caps
+  are reported as `weak` gaps that count toward the `--fail-severity` gate.
 
 ## [0.6.0]
 
