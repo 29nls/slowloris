@@ -245,6 +245,27 @@ slowloris-defend harden-net iptables --syn-rate 25 --udp-rate 100 --icmp-rate 10
 raises the SYN backlog, drops spoofed/martian packets); `iptables` emits
 rate-limiting rules for SYN/UDP/ICMP plus blocking of amplifier source ports.
 
+### Observability outputs
+
+Both detectors can emit monitoring artifacts alongside (or instead of) the JSON
+report, mirroring the benchmark modes:
+
+```bash
+slowloris-defend detect       --input snapshot.json --report-html detect.html \
+                              --report-prometheus detect.prom
+slowloris-defend detect-flood --input flows.json    --report-prometheus flood.prom
+```
+
+- `--report-html` — a self-contained HTML report (risk summary + per-IP / per-flow
+  table, no external assets).
+- `--report-prometheus` — Prometheus text-exposition metrics
+  (`slowloris_defense_attack_detected`, `slowloris_defense_flagged_ips`,
+  `slowloris_defense_ip_score`, `slowloris_defense_flood_by_type`,
+  `slowloris_defense_flood_max_bps`, …) for a node_exporter textfile collector.
+
+When only `--report-html`/`--report-prometheus` are given (no `--report`), the
+JSON is not echoed to stdout; the non-zero exit-on-detection behaviour is unchanged.
+
 ## Features (v0.6.0)
 
 - **Defensive tooling (`slowloris-defend`)**: server-side `detect` (score connection snapshots for slowloris signatures, CI-gatable exit code) and `harden` (generate nginx/Apache/HAProxy timeout, connection-cap and rate-limit config); plus `detect-flood` (SYN/UDP/ICMP flood + NTP/DNS/memcached amplification detection) and `harden-net` (linux-sysctl/iptables kernel & firewall hardening)

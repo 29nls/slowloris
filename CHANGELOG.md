@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Network-layer hardening (`harden-net`).** Generates `linux-sysctl` kernel
   tuning (SYN cookies, backlog, rp_filter, ICMP) and `iptables` SYN/UDP/ICMP
   rate-limiting plus amplifier-port blocking.
+- **Defensive observability outputs.** `detect` and `detect-flood` gained
+  `--report-html` (self-contained HTML report with a risk summary + per-IP /
+  per-flow table) and `--report-prometheus` (metrics such as
+  `slowloris_defense_attack_detected`, `slowloris_defense_ip_score`,
+  `slowloris_defense_flood_by_type`, `slowloris_defense_flood_max_bps`). Public
+  `render_detection_html/prometheus` and `render_flood_html/prometheus` helpers.
 
 ## [0.6.0]
 
