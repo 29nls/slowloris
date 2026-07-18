@@ -353,6 +353,340 @@ def generate_mitigation(server: str, params: MitigationParams | None = None) -> 
 
 
 # --------------------------------------------------------------------------- #
+# Volumetric & amplification flood detection
+# --------------------------------------------------------------------------- #
+
+# UDP source ports commonly abused for reflection / amplification attacks.
+AMPLIFIER_SERVICES: dict[int, str] = {
+    19: "chargen",
+    53: "dns",
+    123: "ntp",
+    161: "snmp",
+    389: "cldap",
+    1900: "ssdp",
+    11211: "memcached",
+}
+
+_PROTOCOLS = ("tcp", "udp", "icmp")
+
+
+class AttackType(str, Enum):
+    """Classification of a volumetric flow finding."""
+
+    SYN_FLOOD = "syn_flood"
+    UDP_FLOOD = "udp_flood"
+    ICMP_FLOOD = "icmp_flood"
+    AMPLIFICATION = "amplification"
+
+
+@dataclass(frozen=True)
+class NetworkFlow:
+    """Aggregated traffic from one source towards the protected target.
+
+    Meant to be produced by netflow/sflow/conntrack/``tcpdump`` accounting on
+    the network you protect. ``syn_only`` marks TCP flows that only ever sent
+    SYNs (no completed handshake) - the SYN-flood signature.
+    """
+
+    protocol: str
+    src_ip: str
+    src_port: int
+    dst_port: int
+    packets: int
+    bytes: int
+    syn_only: bool = False
+    window_seconds: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.protocol not in _PROTOCOLS:
+            raise ValueError(f"protocol must be one of {list(_PROTOCOLS)}")
+        if not self.src_ip:
+            raise ValueError("src_ip cannot be empty")
+        if self.packets < 0 or self.bytes < 0:
+            raise ValueError("packets and bytes cannot be negative")
+        if self.window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+
+    @property
+    def packets_per_second(self) -> float:
+        return self.packets / self.window_seconds
+
+    @property
+    def bits_per_second(self) -> float:
+        return self.bytes * 8 / self.window_seconds
+
+    @property
+    def avg_packet_bytes(self) -> float:
+        if self.packets == 0:
+            return 0.0
+        return self.bytes / self.packets
+
+
+@dataclass(frozen=True)
+class FloodDetectorConfig:
+    """Thresholds for the volumetric / amplification detector."""
+
+    syn_pps: float = 500.0
+    udp_pps: float = 1000.0
+    icmp_pps: float = 500.0
+    # A UDP flow from an amplifier source port with responses at least this
+    # large (and above amplification_min_pps) is treated as reflected traffic.
+    amplification_min_avg_bytes: float = 400.0
+    amplification_min_pps: float = 50.0
+
+    def __post_init__(self) -> None:
+        for name in ("syn_pps", "udp_pps", "icmp_pps", "amplification_min_pps"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+
+
+@dataclass
+class FloodFinding:
+    """A single flow classified as part of a volumetric attack."""
+
+    attack_type: AttackType
+    protocol: str
+    src_ip: str
+    src_port: int
+    dst_port: int
+    packets_per_second: float
+    bits_per_second: float
+    avg_packet_bytes: float
+    severity: str
+    detail: str
+    service: str | None = None
+
+
+@dataclass
+class FloodReport:
+    """Result of analysing a network-flow snapshot."""
+
+    total_flows: int
+    findings: list[FloodFinding]
+
+    @property
+    def attack_detected(self) -> bool:
+        return bool(self.findings)
+
+
+def _severity(ratio: float) -> str:
+    if ratio >= 4:
+        return "critical"
+    if ratio >= 2:
+        return "high"
+    return "medium"
+
+
+def _classify_flow(flow: NetworkFlow, config: FloodDetectorConfig) -> FloodFinding | None:
+    """Classify a single flow, or return None when it looks benign."""
+    pps = flow.packets_per_second
+
+    if (
+        flow.protocol == "udp"
+        and flow.src_port in AMPLIFIER_SERVICES
+        and flow.avg_packet_bytes >= config.amplification_min_avg_bytes
+        and pps >= config.amplification_min_pps
+    ):
+        service = AMPLIFIER_SERVICES[flow.src_port]
+        return FloodFinding(
+            attack_type=AttackType.AMPLIFICATION,
+            protocol=flow.protocol,
+            src_ip=flow.src_ip,
+            src_port=flow.src_port,
+            dst_port=flow.dst_port,
+            packets_per_second=pps,
+            bits_per_second=flow.bits_per_second,
+            avg_packet_bytes=flow.avg_packet_bytes,
+            severity=_severity(flow.avg_packet_bytes / config.amplification_min_avg_bytes),
+            detail=(
+                f"{service} reflection: {flow.avg_packet_bytes:.0f} B/pkt responses "
+                f"from UDP/{flow.src_port}"
+            ),
+            service=service,
+        )
+
+    if flow.protocol == "tcp" and flow.syn_only and pps >= config.syn_pps:
+        return FloodFinding(
+            attack_type=AttackType.SYN_FLOOD,
+            protocol=flow.protocol,
+            src_ip=flow.src_ip,
+            src_port=flow.src_port,
+            dst_port=flow.dst_port,
+            packets_per_second=pps,
+            bits_per_second=flow.bits_per_second,
+            avg_packet_bytes=flow.avg_packet_bytes,
+            severity=_severity(pps / config.syn_pps),
+            detail=f"{pps:.0f} SYN/s with no completed handshake to port {flow.dst_port}",
+        )
+
+    if flow.protocol == "udp" and pps >= config.udp_pps:
+        return FloodFinding(
+            attack_type=AttackType.UDP_FLOOD,
+            protocol=flow.protocol,
+            src_ip=flow.src_ip,
+            src_port=flow.src_port,
+            dst_port=flow.dst_port,
+            packets_per_second=pps,
+            bits_per_second=flow.bits_per_second,
+            avg_packet_bytes=flow.avg_packet_bytes,
+            severity=_severity(pps / config.udp_pps),
+            detail=f"{pps:.0f} UDP pkt/s to port {flow.dst_port}",
+        )
+
+    if flow.protocol == "icmp" and pps >= config.icmp_pps:
+        return FloodFinding(
+            attack_type=AttackType.ICMP_FLOOD,
+            protocol=flow.protocol,
+            src_ip=flow.src_ip,
+            src_port=flow.src_port,
+            dst_port=flow.dst_port,
+            packets_per_second=pps,
+            bits_per_second=flow.bits_per_second,
+            avg_packet_bytes=flow.avg_packet_bytes,
+            severity=_severity(pps / config.icmp_pps),
+            detail=f"{pps:.0f} ICMP pkt/s",
+        )
+
+    return None
+
+
+def detect_floods(
+    flows: list[NetworkFlow],
+    config: FloodDetectorConfig | None = None,
+) -> FloodReport:
+    """Classify a network-flow snapshot for volumetric / amplification attacks."""
+    config = config or FloodDetectorConfig()
+    findings = [f for f in (_classify_flow(flow, config) for flow in flows) if f is not None]
+    findings.sort(key=lambda f: f.bits_per_second, reverse=True)
+    return FloodReport(total_flows=len(flows), findings=findings)
+
+
+def load_flows(raw: str) -> list[NetworkFlow]:
+    """Parse a JSON array of flow objects into ``NetworkFlow``s."""
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError("flow snapshot must be a JSON array of objects")
+
+    allowed = set(NetworkFlow.__annotations__)
+    required = {"protocol", "src_ip", "src_port", "dst_port", "packets", "bytes"}
+    flows: list[NetworkFlow] = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ValueError(f"flow[{i}] must be an object")
+        unknown = set(item) - allowed
+        if unknown:
+            raise ValueError(f"flow[{i}] has unknown field(s): {sorted(unknown)}")
+        missing = required - set(item)
+        if missing:
+            raise ValueError(f"flow[{i}] missing field(s): {sorted(missing)}")
+        flows.append(
+            NetworkFlow(
+                protocol=str(item["protocol"]).lower(),
+                src_ip=str(item["src_ip"]),
+                src_port=int(item["src_port"]),
+                dst_port=int(item["dst_port"]),
+                packets=int(item["packets"]),
+                bytes=int(item["bytes"]),
+                syn_only=bool(item.get("syn_only", False)),
+                window_seconds=float(item.get("window_seconds", 1.0)),
+            )
+        )
+    return flows
+
+
+def flood_report_to_dict(report: FloodReport) -> dict[str, object]:
+    """Serialise a ``FloodReport`` to plain JSON-compatible data."""
+    return {
+        "total_flows": report.total_flows,
+        "attack_detected": report.attack_detected,
+        "findings": [{**asdict(f), "attack_type": f.attack_type.value} for f in report.findings],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Network-layer mitigation (kernel / firewall)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class NetworkMitigationParams:
+    """Rate limits (per second) for the network-layer hardening generators."""
+
+    syn_rate_per_second: int = 25
+    udp_rate_per_second: int = 100
+    icmp_rate_per_second: int = 10
+
+    def __post_init__(self) -> None:
+        for name in ("syn_rate_per_second", "udp_rate_per_second", "icmp_rate_per_second"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+
+
+def _sysctl_config(p: NetworkMitigationParams) -> str:
+    return """# Linux kernel hardening against SYN/flood attacks (/etc/sysctl.d/99-ddos.conf)
+# Enable SYN cookies so the listen queue can't be exhausted by half-open SYNs.
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_synack_retries = 2
+net.core.somaxconn = 4096
+# Ignore ICMP broadcast/echo abuse and drop spoofed/martian packets.
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+# Apply with: sysctl --system
+"""
+
+
+def _iptables_config(p: NetworkMitigationParams) -> str:
+    return f"""# iptables rate-limiting against SYN/UDP/ICMP floods.
+# Drop invalid packets outright.
+iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+# SYN flood: rate-limit new TCP connections, drop the excess.
+iptables -A INPUT -p tcp --syn -m limit \\
+    --limit {p.syn_rate_per_second}/second --limit-burst {p.syn_rate_per_second * 2} -j ACCEPT
+iptables -A INPUT -p tcp --syn -j DROP
+
+# UDP flood: rate-limit new UDP flows.
+iptables -A INPUT -p udp -m limit \\
+    --limit {p.udp_rate_per_second}/second --limit-burst {p.udp_rate_per_second * 2} -j ACCEPT
+iptables -A INPUT -p udp -j DROP
+
+# ICMP (ping) flood: rate-limit echo-requests.
+iptables -A INPUT -p icmp --icmp-type echo-request -m limit \\
+    --limit {p.icmp_rate_per_second}/second -j ACCEPT
+iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+
+# Reflection: never expose amplifiers (ntp/dns/memcached/ssdp/snmp) to the internet;
+# block their UDP source ports inbound if you don't run those services.
+iptables -A INPUT -p udp -m multiport --sports 19,123,1900,11211 -j DROP
+"""
+
+
+_NET_GENERATORS = {
+    "linux-sysctl": _sysctl_config,
+    "iptables": _iptables_config,
+}
+
+SUPPORTED_NET_TARGETS = tuple(_NET_GENERATORS)
+
+
+def generate_network_mitigation(
+    target: str,
+    params: NetworkMitigationParams | None = None,
+) -> str:
+    """Return network-layer hardening configuration for the given target."""
+    try:
+        generator = _NET_GENERATORS[target]
+    except KeyError:
+        raise ValueError(
+            f"unsupported target {target!r}; choose from {list(SUPPORTED_NET_TARGETS)}"
+        ) from None
+    return generator(params or NetworkMitigationParams())
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -478,6 +812,118 @@ def harden_cmd(
     if output_path:
         Path(output_path).write_text(config)
         log.info("wrote mitigation config", server=server, output=output_path)
+    else:
+        click.echo(config)
+
+
+@cli.command("detect-flood")
+@click.option(
+    "--input",
+    "input_path",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="JSON network-flow snapshot to analyse (default: read from stdin)",
+)
+@click.option(
+    "--report",
+    "report_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write the JSON flood report to this path (default: stdout)",
+)
+@click.option("--syn-pps", type=float, default=FloodDetectorConfig.syn_pps, show_default=True)
+@click.option("--udp-pps", type=float, default=FloodDetectorConfig.udp_pps, show_default=True)
+@click.option("--icmp-pps", type=float, default=FloodDetectorConfig.icmp_pps, show_default=True)
+@click.option(
+    "--amp-bytes",
+    type=float,
+    default=FloodDetectorConfig.amplification_min_avg_bytes,
+    show_default=True,
+    help="Min avg response size (bytes/pkt) for an amplifier flow to count",
+)
+@click.option(
+    "--amp-pps",
+    type=float,
+    default=FloodDetectorConfig.amplification_min_pps,
+    show_default=True,
+)
+def detect_flood_cmd(
+    input_path: str | None,
+    report_path: str | None,
+    syn_pps: float,
+    udp_pps: float,
+    icmp_pps: float,
+    amp_bytes: float,
+    amp_pps: float,
+) -> None:
+    """Analyse a flow snapshot for volumetric/amplification attacks; exit 1 if found."""
+    raw = Path(input_path).read_text() if input_path else sys.stdin.read()
+    flows = load_flows(raw)
+    config = FloodDetectorConfig(
+        syn_pps=syn_pps,
+        udp_pps=udp_pps,
+        icmp_pps=icmp_pps,
+        amplification_min_avg_bytes=amp_bytes,
+        amplification_min_pps=amp_pps,
+    )
+    report = detect_floods(flows, config)
+    payload = json.dumps(flood_report_to_dict(report), indent=2)
+
+    if report_path:
+        Path(report_path).write_text(payload + "\n")
+        log.info("flood analysis complete", findings=len(report.findings), report=report_path)
+    else:
+        click.echo(payload)
+
+    if report.attack_detected:
+        raise SystemExit(1)
+
+
+@cli.command("harden-net")
+@click.argument("target", type=click.Choice(SUPPORTED_NET_TARGETS))
+@click.option(
+    "--syn-rate",
+    type=int,
+    default=NetworkMitigationParams.syn_rate_per_second,
+    show_default=True,
+    help="Accepted new SYNs per second (iptables)",
+)
+@click.option(
+    "--udp-rate",
+    type=int,
+    default=NetworkMitigationParams.udp_rate_per_second,
+    show_default=True,
+)
+@click.option(
+    "--icmp-rate",
+    type=int,
+    default=NetworkMitigationParams.icmp_rate_per_second,
+    show_default=True,
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write the config to this path (default: stdout)",
+)
+def harden_net_cmd(
+    target: str,
+    syn_rate: int,
+    udp_rate: int,
+    icmp_rate: int,
+    output_path: str | None,
+) -> None:
+    """Print network-layer hardening for TARGET (linux-sysctl, iptables)."""
+    params = NetworkMitigationParams(
+        syn_rate_per_second=syn_rate,
+        udp_rate_per_second=udp_rate,
+        icmp_rate_per_second=icmp_rate,
+    )
+    config = generate_network_mitigation(target, params)
+    if output_path:
+        Path(output_path).write_text(config)
+        log.info("wrote network mitigation config", target=target, output=output_path)
     else:
         click.echo(config)
 

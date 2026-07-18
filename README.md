@@ -213,9 +213,41 @@ slowloris-defend harden apache  --output apache-hardening.conf
 slowloris-defend harden haproxy
 ```
 
+### Detect volumetric & amplification attacks
+
+Beyond slow-HTTP, `detect-flood` analyses a JSON snapshot of aggregated network
+flows for volumetric signatures — **SYN floods** (high-rate SYNs with no
+completed handshake), **UDP/ICMP floods**, and **reflection/amplification**
+(large UDP responses from abused source ports: NTP `123`, DNS `53`, memcached
+`11211`, SSDP `1900`, SNMP `161`, CLDAP `389`, chargen `19`).
+
+```bash
+# flows.json: [{"protocol": "udp", "src_ip": "6.6.6.6", "src_port": 11211,
+#               "dst_port": 80, "packets": 5000, "bytes": 50000000,
+#               "syn_only": false, "window_seconds": 1.0}, ...]
+
+slowloris-defend detect-flood --input flows.json --report flood.json
+```
+
+It classifies each offending flow (`syn_flood`/`udp_flood`/`icmp_flood`/`amplification`)
+with a severity and exits non-zero when an attack is found. Thresholds are
+tunable (`--syn-pps`, `--udp-pps`, `--icmp-pps`, `--amp-bytes`, `--amp-pps`).
+Flows come from your netflow/sflow/conntrack/`tcpdump` accounting.
+
+### Harden the network layer
+
+```bash
+slowloris-defend harden-net linux-sysctl        # SYN cookies, backlog, rp_filter, ICMP
+slowloris-defend harden-net iptables --syn-rate 25 --udp-rate 100 --icmp-rate 10
+```
+
+`linux-sysctl` emits `/etc/sysctl.d` kernel tuning (enables `tcp_syncookies`,
+raises the SYN backlog, drops spoofed/martian packets); `iptables` emits
+rate-limiting rules for SYN/UDP/ICMP plus blocking of amplifier source ports.
+
 ## Features (v0.6.0)
 
-- **Defensive tooling (`slowloris-defend`)**: server-side `detect` (score connection snapshots for slowloris signatures, CI-gatable exit code) and `harden` (generate nginx/Apache/HAProxy timeout, connection-cap and rate-limit config)
+- **Defensive tooling (`slowloris-defend`)**: server-side `detect` (score connection snapshots for slowloris signatures, CI-gatable exit code) and `harden` (generate nginx/Apache/HAProxy timeout, connection-cap and rate-limit config); plus `detect-flood` (SYN/UDP/ICMP flood + NTP/DNS/memcached amplification detection) and `harden-net` (linux-sysctl/iptables kernel & firewall hardening)
 - **Observability outputs**: `--report-html` (self-contained HTML + SVG chart) and `--report-prometheus` (metrics) for both benchmark modes
 - **Adaptive threshold search**: `--adaptive` closed-loop binary search for the critical concurrency the target tolerates (efficient, CI-gatable via `--min-capacity`)
 - **Resilience benchmark**: `--benchmark` ramps load, probes with legitimate requests, and reports the degradation threshold (JSON + CI exit code)
