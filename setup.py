@@ -18,9 +18,9 @@ setup(
     license="MIT",
     python_requires=">=3.8",
     install_requires=[
-        "click>=8.0.0",
-        "structlog>=23.0.0",
-        "tenacity>=8.0.0",
+        "click>=8.1.8",
+        "structlog>=25.4.0",
+        "tenacity>=9.0.0",
     ],
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -41,6 +41,6 @@ setup(
         "Source": "https://github.com/29nls/slowloris",
     },
     extras_require={
-        "proxy": ["python-socks>=1.2.0"],
+        "proxy": ["python-socks>=2.5.0"],
     },
 )
