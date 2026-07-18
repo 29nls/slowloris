@@ -382,6 +382,28 @@ class Slowloris:
         self._shutdown.set()
 
 
+async def _run_attack(config: Config) -> None:
+    """Set up signal handlers on the running loop and run the attack."""
+    slowloris = Slowloris(config)
+
+    def signal_handler() -> None:
+        log.info("Received interrupt signal, shutting down")
+        slowloris.stop()
+
+    # Register signal handlers on the running loop (asyncio-native)
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    except NotImplementedError:
+        # Windows doesn't support add_signal_handler
+        import signal as sig
+        sig.signal(sig.SIGINT, lambda s, f: signal_handler())
+        sig.signal(sig.SIGTERM, lambda s, f: signal_handler())
+
+    await slowloris.run()
+
+
 # Modern CLI using Click instead of argparse
 @click.command()
 @click.argument("host", required=False)
@@ -479,35 +501,11 @@ def main(
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
     
-    # Setup asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    slowloris = Slowloris(config)
-    
-    # Use asyncio-native signal handling
-    def signal_handler() -> None:
-        log.info("Received interrupt signal, shutting down")
-        slowloris.stop()
-    
-    # Register signal handlers using asyncio native method
+    # Run using the modern asyncio.run() entry point
     try:
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler)
-    except NotImplementedError:
-        # Windows doesn't support add_signal_handler
-        import signal as sig
-        sig.signal(sig.SIGINT, lambda s, f: signal_handler())
-        sig.signal(sig.SIGTERM, lambda s, f: signal_handler())
-    
-    try:
-        loop.run_until_complete(slowloris.run())
+        asyncio.run(_run_attack(config))
     except KeyboardInterrupt:
         log.info("Interrupted, shutting down")
-        slowloris.stop()
-        loop.run_until_complete(asyncio.sleep(0.5))
-    finally:
-        loop.close()
 
 
 if __name__ == "__main__":
