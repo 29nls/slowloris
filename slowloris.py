@@ -173,13 +173,8 @@ class Slowloris:
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         
-        # Enable TLS 1.3 (default in Python 3.8+)
-        # Min version TLS 1.2 for compatibility
-        try:
-            ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
-        except AttributeError:
-            # Python < 3.8 fallback
-            pass
+        # Require at least TLS 1.2 (TLS 1.3 negotiated when available)
+        ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
         
         # Set secure ciphers
         try:

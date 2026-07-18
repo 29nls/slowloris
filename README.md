@@ -129,7 +129,7 @@ slowloris example.com --sleeptime 20 --jitter 5
 
 ## Requirements
 
-- **Python**: 3.8 or higher
+- **Python**: 3.10 or higher
 - **Core dependencies**:
   - `click` >= 8.1.8 (CLI framework)
   - `structlog` >= 25.4.0 (Structured logging)
