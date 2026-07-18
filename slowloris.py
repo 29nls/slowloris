@@ -40,7 +40,7 @@ from tenacity import (
     wait_exponential,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 # Configure structlog with console output
 structlog.configure(
