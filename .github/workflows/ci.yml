@@ -23,7 +23,7 @@ jobs:
       - name: Ruff format
         run: ruff format --check .
       - name: Mypy
-        run: mypy slowloris.py
+        run: mypy slowloris.py defense.py
 
   test:
     runs-on: ubuntu-latest

@@ -176,8 +176,46 @@ JSON report:
 
 Each measured level also records a `timestamp`, giving a degradation timeline.
 
+## Defensive tooling (`slowloris-defend`)
+
+The package also ships a **defensive** counterpart. Where the benchmark modes
+*measure* how a server you own tolerates slow-HTTP load, `slowloris-defend`
+helps you *detect* and *mitigate* slow-HTTP / slowloris attacks server-side.
+
+### Detect
+
+Feed it a JSON snapshot of your server's in-progress connections. It groups
+connections per client IP, scores slowloris signatures (many concurrent
+connections, stalled/idle incomplete requests, abnormally slow transfer
+rates), and classifies each IP as `ok`/`suspicious`/`malicious`.
+
+```bash
+# snapshot.json is an array of observed connections:
+# [{"client_ip": "6.6.6.6", "age_seconds": 30, "bytes_received": 40,
+#   "request_complete": false, "idle_seconds": 10}, ...]
+
+slowloris-defend detect --input snapshot.json --report detection.json
+```
+
+It exits non-zero when an attack is detected, so it can gate a monitoring job.
+Thresholds are tunable (`--min-age`, `--slow-bps`, `--max-conns`, `--max-idle`).
+The snapshot is produced by *your* server/LB (access logs, `ss`/`netstat`, or
+application middleware); the detector never opens connections itself.
+
+### Harden
+
+Generate ready-to-apply hardening configuration (request-read timeouts, per-IP
+connection caps, and request-rate limiting) for common servers/proxies:
+
+```bash
+slowloris-defend harden nginx   --header-timeout 10 --max-conns 20 --rate-per-minute 120
+slowloris-defend harden apache  --output apache-hardening.conf
+slowloris-defend harden haproxy
+```
+
 ## Features (v0.6.0)
 
+- **Defensive tooling (`slowloris-defend`)**: server-side `detect` (score connection snapshots for slowloris signatures, CI-gatable exit code) and `harden` (generate nginx/Apache/HAProxy timeout, connection-cap and rate-limit config)
 - **Observability outputs**: `--report-html` (self-contained HTML + SVG chart) and `--report-prometheus` (metrics) for both benchmark modes
 - **Adaptive threshold search**: `--adaptive` closed-loop binary search for the critical concurrency the target tolerates (efficient, CI-gatable via `--min-capacity`)
 - **Resilience benchmark**: `--benchmark` ramps load, probes with legitimate requests, and reports the degradation threshold (JSON + CI exit code)
