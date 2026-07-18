@@ -21,8 +21,7 @@ import signal
 import socket
 import ssl
 import sys
-from dataclasses import dataclass, field
-from typing import Optional, Set
+from dataclasses import dataclass
 
 # Modern CLI package
 import click
@@ -153,8 +152,8 @@ class Slowloris:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._shutdown = asyncio.Event()
-        self._tasks: Set[asyncio.Task[None]] = set()
-        self._ssl: Optional[ssl.SSLContext] = None
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._ssl: ssl.SSLContext | None = None
         
         # Enhanced SSL context with TLS 1.3 support
         if config.https:
@@ -228,7 +227,7 @@ class Slowloris:
             socket.SOCK_STREAM,
         )
         
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for family, socktype, proto, canonname, sockaddr in addrinfo:
             try:
                 host_addr: str = str(sockaddr[0])  # Cast to str for type safety
@@ -278,7 +277,7 @@ class Slowloris:
         import secrets
         
         while not self._shutdown.is_set():
-            writer: Optional[asyncio.StreamWriter] = None
+            writer: asyncio.StreamWriter | None = None
             try:
                 # Use async context manager for automatic cleanup
                 reader, writer = await self._open_connection()
@@ -458,7 +457,7 @@ async def _run_attack(config: Config) -> None:
 )
 @click.version_option(version=__version__)
 def main(
-    host: Optional[str],
+    host: str | None,
     port: int,
     sockets: int,
     verbose: bool,
