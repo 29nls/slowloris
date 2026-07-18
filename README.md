@@ -115,6 +115,11 @@ slowloris example.com --sleeptime 20 --jitter 5
 | `--levels` | - | string | 10,50,100,200 | Comma-separated concurrency levels for `--benchmark` |
 | `--step-duration` | - | float | 5.0 | Seconds to probe at each benchmark level |
 | `--fail-under` | - | float | 0.9 | Probe success-rate threshold for degradation |
+| `--adaptive` | - | flag | false | Adaptive mode: closed-loop search for the critical threshold |
+| `--start` | - | integer | 10 | Starting concurrency for `--adaptive` search |
+| `--max-sockets` | - | integer | 1000 | Upper bound on concurrency for `--adaptive` search |
+| `--tolerance` | - | integer | 5 | Stop `--adaptive` when the bracket is within this many sockets |
+| `--min-capacity` | - | integer | none | Fail (exit 1) if `--adaptive` threshold is below this value |
 | `--report` | - | path | stdout | Write benchmark report as JSON to this path |
 | `--version` | - | - | - | Show version information |
 
@@ -136,8 +141,28 @@ The JSON report contains per-level probe success rate and latency plus
 `degraded_at` (the first level below `--fail-under`, or `null`). The process
 exits non-zero when degradation is detected, so it can gate a CI job.
 
-## Features (v0.4.0)
+### Adaptive mode
 
+`--adaptive` is a closed-loop variant: instead of a fixed list of levels, it
+reacts to the server's responsiveness. It grows concurrency exponentially until
+legitimate probes start failing, then binary-searches the bracket to converge
+(within `--tolerance` sockets) on the highest number of held connections the
+server still tolerates — using far fewer trials than a dense ramp.
+
+```bash
+slowloris 127.0.0.1 -p 8080 --adaptive \
+    --start 10 --max-sockets 1000 --tolerance 5 \
+    --min-capacity 200 --report report.json
+```
+
+The report includes `critical_sockets` (the measured threshold),
+`first_degraded_at`, `converged`, and per-trial metrics. With `--min-capacity`
+the process exits non-zero when the measured threshold is below the required
+value, so a CI job can assert "must sustain at least N concurrent connections".
+
+## Features (v0.5.0)
+
+- **Adaptive threshold search**: `--adaptive` closed-loop binary search for the critical concurrency the target tolerates (efficient, CI-gatable via `--min-capacity`)
 - **Resilience benchmark**: `--benchmark` ramps load, probes with legitimate requests, and reports the degradation threshold (JSON + CI exit code)
 - **Asyncio-based**: Uses Python asyncio for maximum concurrent connections
 - **Non-blocking DNS**: Async name resolution via `loop.getaddrinfo` (never blocks the event loop)
