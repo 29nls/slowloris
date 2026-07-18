@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Defensive tooling (`slowloris-defend`).** A server-side counterpart in
+  `defense.py` with two subcommands: `detect` scores a JSON snapshot of
+  in-progress connections for slowloris signatures (per-IP concurrency,
+  stalled/idle incomplete requests, slow transfer rates) and exits non-zero
+  when an attack is detected; `harden` generates request-timeout, per-IP
+  connection-cap and rate-limit configuration for nginx, Apache, and HAProxy.
+  CI now also type-checks `defense.py`.
+
 ## [0.6.0]
 
 ### Added

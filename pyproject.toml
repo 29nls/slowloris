@@ -45,9 +45,10 @@ dev = [
 
 [project.scripts]
 slowloris = "slowloris:main"
+slowloris-defend = "defense:main"
 
 [tool.setuptools]
-py-modules = ["slowloris"]
+py-modules = ["slowloris", "defense"]
 
 [tool.ruff]
 line-length = 100
