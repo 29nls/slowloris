@@ -23,6 +23,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from html import escape
 from pathlib import Path
 
 import click
@@ -687,6 +688,156 @@ def generate_network_mitigation(
 
 
 # --------------------------------------------------------------------------- #
+# Observability outputs (Prometheus + HTML) for the detectors
+# --------------------------------------------------------------------------- #
+
+_FLOOD_SEVERITY_RANK = {"medium": 1, "high": 2, "critical": 3}
+
+
+def _prom_escape(value: str) -> str:
+    """Escape a Prometheus label value (backslash, quote, newline)."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _slow_http_risk_level(report: DetectionReport) -> str:
+    if report.malicious_ips:
+        return "critical"
+    if report.suspicious_ips:
+        return "elevated"
+    return "ok"
+
+
+def _flood_risk_level(report: FloodReport) -> str:
+    if not report.findings:
+        return "ok"
+    worst = max(_FLOOD_SEVERITY_RANK.get(f.severity, 0) for f in report.findings)
+    return {3: "critical", 2: "high"}.get(worst, "elevated")
+
+
+def render_detection_prometheus(report: DetectionReport) -> str:
+    """Render a slow-HTTP ``DetectionReport`` as Prometheus text-exposition metrics."""
+    lines = [
+        "# HELP slowloris_defense_connections_total Connections in the analysed snapshot",
+        "# TYPE slowloris_defense_connections_total gauge",
+        f"slowloris_defense_connections_total {report.total_connections}",
+        "# HELP slowloris_defense_ips_total Distinct client IPs analysed",
+        "# TYPE slowloris_defense_ips_total gauge",
+        f"slowloris_defense_ips_total {report.total_ips}",
+        "# HELP slowloris_defense_attack_detected 1 if malicious IPs were found",
+        "# TYPE slowloris_defense_attack_detected gauge",
+        f"slowloris_defense_attack_detected {int(report.attack_detected)}",
+        "# HELP slowloris_defense_flagged_ips Flagged client IPs by verdict",
+        "# TYPE slowloris_defense_flagged_ips gauge",
+        f'slowloris_defense_flagged_ips{{verdict="suspicious"}} {len(report.suspicious_ips)}',
+        f'slowloris_defense_flagged_ips{{verdict="malicious"}} {len(report.malicious_ips)}',
+        "# HELP slowloris_defense_ip_score Risk score per client IP",
+        "# TYPE slowloris_defense_ip_score gauge",
+    ]
+    for a in report.assessments:
+        ip = _prom_escape(a.client_ip)
+        lines.append(
+            f'slowloris_defense_ip_score{{ip="{ip}",verdict="{a.verdict.value}"}} {a.score}'
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_flood_prometheus(report: FloodReport) -> str:
+    """Render a ``FloodReport`` as Prometheus text-exposition metrics."""
+    by_type: dict[str, int] = {}
+    for f in report.findings:
+        by_type[f.attack_type.value] = by_type.get(f.attack_type.value, 0) + 1
+    max_bps = max((f.bits_per_second for f in report.findings), default=0.0)
+
+    lines = [
+        "# HELP slowloris_defense_flows_total Flows in the analysed snapshot",
+        "# TYPE slowloris_defense_flows_total gauge",
+        f"slowloris_defense_flows_total {report.total_flows}",
+        "# HELP slowloris_defense_attack_detected 1 if any flood finding was raised",
+        "# TYPE slowloris_defense_attack_detected gauge",
+        f"slowloris_defense_attack_detected {int(report.attack_detected)}",
+        "# HELP slowloris_defense_flood_findings_total Number of offending flows",
+        "# TYPE slowloris_defense_flood_findings_total gauge",
+        f"slowloris_defense_flood_findings_total {len(report.findings)}",
+        "# HELP slowloris_defense_flood_by_type Offending flows by attack type",
+        "# TYPE slowloris_defense_flood_by_type gauge",
+    ]
+    for attack_type, count in sorted(by_type.items()):
+        lines.append(f'slowloris_defense_flood_by_type{{type="{attack_type}"}} {count}')
+    lines.append("# HELP slowloris_defense_flood_max_bps Peak bits/sec across offending flows")
+    lines.append("# TYPE slowloris_defense_flood_max_bps gauge")
+    lines.append(f"slowloris_defense_flood_max_bps {max_bps:.0f}")
+    return "\n".join(lines) + "\n"
+
+
+_HTML_STYLE = (
+    "body{font-family:system-ui,sans-serif;margin:2rem;color:#111}"
+    "table{border-collapse:collapse;margin-top:1rem}"
+    "th,td{border:1px solid #ccc;padding:4px 10px;text-align:left}"
+    ".critical{color:#b00020;font-weight:bold}.high{color:#c05600;font-weight:bold}"
+    ".elevated{color:#c05600}.medium{color:#c05600}.ok{color:#0a7d33}"
+)
+
+
+def _html_page(title: str, body: str) -> str:
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{escape(title)}</title><style>{_HTML_STYLE}</style></head><body>"
+        f"<h1>{escape(title)}</h1>{body}</body></html>"
+    )
+
+
+def render_detection_html(report: DetectionReport) -> str:
+    """Render a self-contained HTML report for a slow-HTTP ``DetectionReport``."""
+    risk = _slow_http_risk_level(report)
+    rows = []
+    for a in report.assessments:
+        reasons = escape("; ".join(a.reasons)) if a.reasons else "-"
+        rows.append(
+            f"<tr><td>{escape(a.client_ip)}</td>"
+            f'<td class="{a.verdict.value}">{a.verdict.value}</td>'
+            f"<td>{a.score}</td><td>{a.total_connections}</td>"
+            f"<td>{a.slow_connections}</td><td>{a.stalled_connections}</td>"
+            f"<td>{reasons}</td></tr>"
+        )
+    body = (
+        f'<p>Overall risk: <span class="{risk}">{risk}</span></p>'
+        f"<ul><li><b>Connections</b>: {report.total_connections}</li>"
+        f"<li><b>Distinct IPs</b>: {report.total_ips}</li>"
+        f"<li><b>Suspicious</b>: {len(report.suspicious_ips)}</li>"
+        f"<li><b>Malicious</b>: {len(report.malicious_ips)}</li></ul>"
+        "<table><tr><th>Client IP</th><th>Verdict</th><th>Score</th>"
+        "<th>Conns</th><th>Slow</th><th>Stalled</th><th>Reasons</th></tr>"
+        f"{''.join(rows)}</table>"
+    )
+    return _html_page("Slow-HTTP detection report", body)
+
+
+def render_flood_html(report: FloodReport) -> str:
+    """Render a self-contained HTML report for a ``FloodReport``."""
+    risk = _flood_risk_level(report)
+    rows = []
+    for f in report.findings:
+        service = escape(f.service) if f.service else "-"
+        rows.append(
+            f'<tr><td class="{f.severity}">{f.attack_type.value}</td>'
+            f"<td>{f.severity}</td><td>{escape(f.src_ip)}</td>"
+            f"<td>{escape(f.protocol)}/{f.src_port}</td><td>{f.dst_port}</td>"
+            f"<td>{f.packets_per_second:.0f}</td><td>{f.bits_per_second:.0f}</td>"
+            f"<td>{service}</td><td>{escape(f.detail)}</td></tr>"
+        )
+    body = (
+        f'<p>Overall risk: <span class="{risk}">{risk}</span></p>'
+        f"<ul><li><b>Flows</b>: {report.total_flows}</li>"
+        f"<li><b>Findings</b>: {len(report.findings)}</li></ul>"
+        "<table><tr><th>Attack</th><th>Severity</th><th>Source IP</th>"
+        "<th>Proto/SrcPort</th><th>DstPort</th><th>pkt/s</th><th>bit/s</th>"
+        "<th>Service</th><th>Detail</th></tr>"
+        f"{''.join(rows)}</table>"
+    )
+    return _html_page("Volumetric / amplification detection report", body)
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -733,6 +884,20 @@ def cli() -> None:
     default=DetectorConfig.max_idle_seconds,
     show_default=True,
 )
+@click.option(
+    "--report-html",
+    "html_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write a self-contained HTML detection report to this path",
+)
+@click.option(
+    "--report-prometheus",
+    "prometheus_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write Prometheus text-exposition metrics to this path",
+)
 def detect_cmd(
     input_path: str | None,
     report_path: str | None,
@@ -740,6 +905,8 @@ def detect_cmd(
     slow_bps: float,
     max_conns: int,
     max_idle: float,
+    html_path: str | None,
+    prometheus_path: str | None,
 ) -> None:
     """Analyse a connection snapshot; exit non-zero if an attack is detected."""
     raw = Path(input_path).read_text() if input_path else sys.stdin.read()
@@ -753,6 +920,11 @@ def detect_cmd(
     report = detect(samples, config)
     payload = json.dumps(report_to_dict(report), indent=2)
 
+    if html_path:
+        Path(html_path).write_text(render_detection_html(report))
+    if prometheus_path:
+        Path(prometheus_path).write_text(render_detection_prometheus(report))
+
     if report_path:
         Path(report_path).write_text(payload + "\n")
         log.info(
@@ -761,7 +933,7 @@ def detect_cmd(
             suspicious=len(report.suspicious_ips),
             report=report_path,
         )
-    else:
+    elif not (html_path or prometheus_path):
         click.echo(payload)
 
     if report.attack_detected:
@@ -847,6 +1019,20 @@ def harden_cmd(
     default=FloodDetectorConfig.amplification_min_pps,
     show_default=True,
 )
+@click.option(
+    "--report-html",
+    "html_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write a self-contained HTML flood report to this path",
+)
+@click.option(
+    "--report-prometheus",
+    "prometheus_path",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write Prometheus text-exposition metrics to this path",
+)
 def detect_flood_cmd(
     input_path: str | None,
     report_path: str | None,
@@ -855,6 +1041,8 @@ def detect_flood_cmd(
     icmp_pps: float,
     amp_bytes: float,
     amp_pps: float,
+    html_path: str | None,
+    prometheus_path: str | None,
 ) -> None:
     """Analyse a flow snapshot for volumetric/amplification attacks; exit 1 if found."""
     raw = Path(input_path).read_text() if input_path else sys.stdin.read()
@@ -869,10 +1057,15 @@ def detect_flood_cmd(
     report = detect_floods(flows, config)
     payload = json.dumps(flood_report_to_dict(report), indent=2)
 
+    if html_path:
+        Path(html_path).write_text(render_flood_html(report))
+    if prometheus_path:
+        Path(prometheus_path).write_text(render_flood_prometheus(report))
+
     if report_path:
         Path(report_path).write_text(payload + "\n")
         log.info("flood analysis complete", findings=len(report.findings), report=report_path)
-    else:
+    elif not (html_path or prometheus_path):
         click.echo(payload)
 
     if report.attack_detected:
