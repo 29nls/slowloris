@@ -125,3 +125,9 @@ class TestCLI:
         result = CliRunner().invoke(main, ["example.com", "-p", "70000"])
         assert result.exit_code == 1
         assert "Error" in result.output
+
+    def test_useproxy_without_python_socks_fails_fast(self, monkeypatch):
+        monkeypatch.setattr(slowloris, "_PROXY_AVAILABLE", False)
+        result = CliRunner().invoke(main, ["example.com", "--useproxy"])
+        assert result.exit_code == 1
+        assert "python-socks" in result.output
