@@ -16,7 +16,7 @@ setup(
     url="https://github.com/29nls/slowloris",
     keywords=["dos", "http", "slowloris", "security", "testing"],
     license="MIT",
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=[
         "click>=8.1.8",
         "structlog>=25.4.0",
@@ -29,11 +29,10 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         "Topic :: Security",
     ],
     project_urls={
