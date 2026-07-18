@@ -110,6 +110,7 @@ slowloris example.com --sleeptime 20 --jitter 5
 | `--https` | - | flag | false | Use HTTPS instead of HTTP |
 | `--sleeptime` | - | float | 15.0 | Seconds between keep-alive headers |
 | `--jitter` | - | float | 3.0 | Random jitter for sleep time (±seconds) |
+| `--connect-timeout` | - | float | 10.0 | Timeout for connecting and writing (seconds) |
 | `--version` | - | - | - | Show version information |
 
 ## Features (v0.3.1)

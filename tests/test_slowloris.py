@@ -43,6 +43,11 @@ class TestConfig:
         with pytest.raises(ValueError, match="Jitter must be non-negative"):
             Config(host="x", jitter=-0.1)
 
+    @pytest.mark.parametrize("timeout", [0, -5])
+    def test_non_positive_connect_timeout_raises(self, timeout):
+        with pytest.raises(ValueError, match="Connect timeout must be positive"):
+            Config(host="x", connect_timeout=timeout)
+
     def test_to_dict_round_trips_all_fields(self):
         cfg = Config(host="x", port=443, https=True)
         d = cfg.to_dict()
@@ -61,6 +66,7 @@ class TestConfig:
             "https",
             "sleeptime",
             "jitter",
+            "connect_timeout",
         }
 
     def test_frozen(self):
