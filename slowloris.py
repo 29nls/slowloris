@@ -22,6 +22,7 @@ import socket
 import ssl
 import sys
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 # Modern CLI package
 import click
@@ -32,9 +33,9 @@ import structlog
 # Retry logic with tenacity
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
 
 __version__ = "0.3.1"
@@ -63,22 +64,20 @@ log = structlog.get_logger()
 
 # Modern user agents (2026) - Using tuple for immutability
 USER_AGENTS = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",  # noqa: E501
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",  # noqa: E501
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",  # noqa: E501
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 15.7; rv:152.0) Gecko/20100101 Firefox/152.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",  # noqa: E501
     "Mozilla/5.0 (X11; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.4078.80",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.4078.80",  # noqa: E501
 )
 
 # Optional SOCKS5 support
 _PROXY_AVAILABLE = False
 
 # Use TYPE_CHECKING to satisfy type checkers without runtime import issues
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from python_socks import ProxyType
     from python_socks.async_.asyncio import Proxy
@@ -228,7 +227,7 @@ class Slowloris:
         )
         
         last_error: Exception | None = None
-        for family, socktype, proto, canonname, sockaddr in addrinfo:
+        for _family, _socktype, _proto, _canonname, sockaddr in addrinfo:
             try:
                 host_addr: str = str(sockaddr[0])  # Cast to str for type safety
                 return await asyncio.wait_for(
