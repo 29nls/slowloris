@@ -121,6 +121,8 @@ slowloris example.com --sleeptime 20 --jitter 5
 | `--tolerance` | - | integer | 5 | Stop `--adaptive` when the bracket is within this many sockets |
 | `--min-capacity` | - | integer | none | Fail (exit 1) if `--adaptive` threshold is below this value |
 | `--report` | - | path | stdout | Write benchmark report as JSON to this path |
+| `--report-html` | - | path | none | Write a self-contained HTML report (table + chart) |
+| `--report-prometheus` | - | path | none | Write Prometheus text-exposition metrics |
 | `--version` | - | - | - | Show version information |
 
 ## Resilience benchmark mode
@@ -160,8 +162,23 @@ The report includes `critical_sockets` (the measured threshold),
 the process exits non-zero when the measured threshold is below the required
 value, so a CI job can assert "must sustain at least N concurrent connections".
 
-## Features (v0.5.0)
+### Observability outputs
 
+Both benchmark modes can emit richer artifacts alongside (or instead of) the
+JSON report:
+
+- `--report-html report.html` — a self-contained HTML report (summary,
+  per-level table, and an inline SVG success-rate chart; no external assets).
+- `--report-prometheus metrics.prom` — Prometheus text-exposition metrics
+  (`slowloris_probe_success_rate`, `slowloris_avg_latency_ms`, and
+  `slowloris_critical_sockets` for adaptive runs), e.g. for a node_exporter
+  textfile collector.
+
+Each measured level also records a `timestamp`, giving a degradation timeline.
+
+## Features (v0.6.0)
+
+- **Observability outputs**: `--report-html` (self-contained HTML + SVG chart) and `--report-prometheus` (metrics) for both benchmark modes
 - **Adaptive threshold search**: `--adaptive` closed-loop binary search for the critical concurrency the target tolerates (efficient, CI-gatable via `--min-capacity`)
 - **Resilience benchmark**: `--benchmark` ramps load, probes with legitimate requests, and reports the degradation threshold (JSON + CI exit code)
 - **Asyncio-based**: Uses Python asyncio for maximum concurrent connections

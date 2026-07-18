@@ -23,6 +23,8 @@ from slowloris import (
     _summarize_level,
     main,
     probe,
+    render_html,
+    render_prometheus,
 )
 
 
@@ -286,7 +288,7 @@ class TestBenchmark:
 
 class TestBenchmarkCLI:
     def test_benchmark_success_exit_code(self, monkeypatch):
-        async def fake(config, levels, step_duration, fail_under, report_path):
+        async def fake(*args, **kwargs):
             return 0
 
         monkeypatch.setattr(slowloris, "_run_benchmark", fake)
@@ -294,7 +296,7 @@ class TestBenchmarkCLI:
         assert result.exit_code == 0
 
     def test_benchmark_degraded_exit_code(self, monkeypatch):
-        async def fake(config, levels, step_duration, fail_under, report_path):
+        async def fake(*args, **kwargs):
             return 1
 
         monkeypatch.setattr(slowloris, "_run_benchmark", fake)
@@ -302,7 +304,7 @@ class TestBenchmarkCLI:
         assert result.exit_code == 1
 
     def test_benchmark_bad_levels_exit_code(self, monkeypatch):
-        async def fake(config, levels, step_duration, fail_under, report_path):
+        async def fake(*args, **kwargs):
             return 0
 
         monkeypatch.setattr(slowloris, "_run_benchmark", fake)
@@ -374,16 +376,7 @@ class TestAdaptiveBenchmark:
 
 class TestAdaptiveCLI:
     def test_adaptive_success_exit_code(self, monkeypatch):
-        async def fake(
-            config,
-            start,
-            max_sockets,
-            tolerance,
-            step_duration,
-            fail_under,
-            min_capacity,
-            report_path,
-        ):
+        async def fake(*args, **kwargs):
             return 0
 
         monkeypatch.setattr(slowloris, "_run_adaptive", fake)
@@ -391,16 +384,7 @@ class TestAdaptiveCLI:
         assert result.exit_code == 0
 
     def test_adaptive_below_capacity_exit_code(self, monkeypatch):
-        async def fake(
-            config,
-            start,
-            max_sockets,
-            tolerance,
-            step_duration,
-            fail_under,
-            min_capacity,
-            report_path,
-        ):
+        async def fake(*args, **kwargs):
             return 1
 
         monkeypatch.setattr(slowloris, "_run_adaptive", fake)
@@ -416,3 +400,101 @@ class TestAdaptiveCLI:
             main, ["example.com", "--adaptive", "--start", "100", "--max-sockets", "10"]
         )
         assert result.exit_code == 2
+
+
+_BENCH_REPORT = {
+    "target": {"host": "127.0.0.1", "port": 8080, "https": False},
+    "fail_under": 0.9,
+    "levels": [
+        {
+            "sockets": 10,
+            "probes": 5,
+            "probe_successes": 5,
+            "success_rate": 1.0,
+            "avg_latency_ms": 12.0,
+            "max_latency_ms": 20.0,
+            "connections_created": 10,
+        },
+        {
+            "sockets": 50,
+            "probes": 5,
+            "probe_successes": 2,
+            "success_rate": 0.4,
+            "avg_latency_ms": 300.0,
+            "max_latency_ms": 900.0,
+            "connections_created": 50,
+        },
+    ],
+    "degraded_at": 50,
+}
+
+_ADAPTIVE_REPORT = {
+    "target": {"host": "example.com", "port": 80, "https": True},
+    "fail_under": 0.9,
+    "tolerance": 5,
+    "max_sockets": 1000,
+    "critical_sockets": 128,
+    "first_degraded_at": 256,
+    "converged": True,
+    "trials": [
+        {
+            "sockets": 128,
+            "probes": 5,
+            "probe_successes": 5,
+            "success_rate": 1.0,
+            "avg_latency_ms": 5.0,
+            "max_latency_ms": 9.0,
+            "connections_created": 128,
+        }
+    ],
+}
+
+
+class TestReportRenderers:
+    def test_prometheus_benchmark(self):
+        text = render_prometheus(_BENCH_REPORT)
+        assert "# TYPE slowloris_probe_success_rate gauge" in text
+        assert 'slowloris_probe_success_rate{host="127.0.0.1",port="8080",sockets="10"} 1.0' in text
+        assert 'slowloris_avg_latency_ms{host="127.0.0.1",port="8080",sockets="50"} 300.0' in text
+        assert "slowloris_critical_sockets" not in text
+
+    def test_prometheus_adaptive(self):
+        text = render_prometheus(_ADAPTIVE_REPORT)
+        assert 'slowloris_critical_sockets{host="example.com",port="80"} 128' in text
+        assert 'sockets="128"' in text
+
+    def test_html_benchmark(self):
+        html = render_html(_BENCH_REPORT)
+        assert html.startswith("<!doctype html>")
+        assert "<svg" in html
+        assert "degraded_at" in html
+        assert "<td>50</td>" in html
+
+    def test_html_adaptive(self):
+        html = render_html(_ADAPTIVE_REPORT)
+        assert "critical_sockets" in html
+        assert "<svg" in html
+
+    def test_observability_files_written(self, tmp_path, monkeypatch):
+        async def fake_bench_run(self):
+            return _BENCH_REPORT
+
+        monkeypatch.setattr(Benchmark, "run", fake_bench_run)
+        html_file = tmp_path / "r.html"
+        prom_file = tmp_path / "r.prom"
+        result = CliRunner().invoke(
+            main,
+            [
+                "example.com",
+                "--benchmark",
+                "--levels",
+                "10,50",
+                "--report-html",
+                str(html_file),
+                "--report-prometheus",
+                str(prom_file),
+            ],
+        )
+        assert result.exit_code == 1  # degraded_at set
+        assert html_file.exists() and "<svg" in html_file.read_text()
+        assert prom_file.exists() and "slowloris_probe_success_rate" in prom_file.read_text()

@@ -26,6 +26,7 @@ import ssl
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
+from html import escape
 from statistics import mean
 from typing import TYPE_CHECKING
 
@@ -43,7 +44,7 @@ from tenacity import (
     wait_exponential,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # Configure structlog with console output
 structlog.configure(
@@ -453,6 +454,7 @@ async def _measure_level(
         await engine.stop_and_join()
     summary = _summarize_level(level, results)
     summary["connections_created"] = engine.connections_created
+    summary["timestamp"] = round(time.time(), 3)
     return summary
 
 
@@ -650,6 +652,144 @@ def _parse_levels(raw: str) -> list[int]:
     return levels
 
 
+def _report_series(report: dict[str, object]) -> list[dict[str, object]]:
+    """Return the ordered per-level/per-trial measurements from a report."""
+    series = report.get("levels")
+    if series is None:
+        series = report.get("trials", [])
+    assert isinstance(series, list)
+    return series
+
+
+def render_prometheus(report: dict[str, object]) -> str:
+    """Render a report as Prometheus text-exposition metrics."""
+    target = report.get("target", {})
+    assert isinstance(target, dict)
+    host = target.get("host", "")
+    port = target.get("port", "")
+    lines = [
+        "# HELP slowloris_probe_success_rate Probe success rate at a concurrency level",
+        "# TYPE slowloris_probe_success_rate gauge",
+        "# HELP slowloris_avg_latency_ms Average probe latency in milliseconds",
+        "# TYPE slowloris_avg_latency_ms gauge",
+    ]
+    for entry in _report_series(report):
+        sockets = entry["sockets"]
+        labels = f'host="{host}",port="{port}",sockets="{sockets}"'
+        lines.append(f"slowloris_probe_success_rate{{{labels}}} {entry['success_rate']}")
+        avg = entry["avg_latency_ms"]
+        if avg is not None:
+            lines.append(f"slowloris_avg_latency_ms{{{labels}}} {avg}")
+    critical = report.get("critical_sockets")
+    if critical is not None:
+        lines.append("# HELP slowloris_critical_sockets Measured critical concurrency")
+        lines.append("# TYPE slowloris_critical_sockets gauge")
+        lines.append(f'slowloris_critical_sockets{{host="{host}",port="{port}"}} {critical}')
+    return "\n".join(lines) + "\n"
+
+
+def _svg_chart(series: list[dict[str, object]]) -> str:
+    """Render a minimal inline SVG line chart of success rate vs concurrency."""
+    points: list[tuple[float, float]] = []
+    for entry in series:
+        sockets = entry["sockets"]
+        rate = entry["success_rate"]
+        if isinstance(sockets, int) and isinstance(rate, int | float):
+            points.append((float(sockets), float(rate)))
+    if not points:
+        return "<p>No data.</p>"
+    width, height, pad = 640, 240, 40
+    xs = [x for x, _ in points]
+    max_x = max(xs) or 1.0
+    min_x = min(xs)
+    span_x = (max_x - min_x) or 1.0
+
+    def sx(x: float) -> float:
+        return pad + (x - min_x) / span_x * (width - 2 * pad)
+
+    def sy(rate: float) -> float:
+        return height - pad - rate * (height - 2 * pad)
+
+    poly = " ".join(f"{sx(x):.1f},{sy(r):.1f}" for x, r in points)
+    dots = "".join(
+        f'<circle cx="{sx(x):.1f}" cy="{sy(r):.1f}" r="3" fill="#c0392b"/>' for x, r in points
+    )
+    return (
+        f'<svg width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" role="img">'
+        f'<rect x="0" y="0" width="{width}" height="{height}" fill="#fafafa"/>'
+        f'<line x1="{pad}" y1="{height - pad}" x2="{width - pad}" '
+        f'y2="{height - pad}" stroke="#999"/>'
+        f'<line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height - pad}" stroke="#999"/>'
+        f'<text x="{pad}" y="{pad - 15}" font-size="12">success rate</text>'
+        f'<text x="{width - pad}" y="{height - pad + 25}" font-size="12" '
+        f'text-anchor="end">sockets</text>'
+        f'<polyline fill="none" stroke="#2980b9" stroke-width="2" points="{poly}"/>'
+        f"{dots}</svg>"
+    )
+
+
+def render_html(report: dict[str, object]) -> str:
+    """Render a self-contained HTML report (table + inline SVG chart)."""
+    target = report.get("target", {})
+    assert isinstance(target, dict)
+    series = _report_series(report)
+    title = f"Slowloris resilience report - {escape(str(target.get('host', '')))}"
+
+    rows = []
+    for entry in series:
+        rows.append(
+            "<tr>"
+            f"<td>{entry['sockets']}</td>"
+            f"<td>{entry['success_rate']}</td>"
+            f"<td>{entry['avg_latency_ms']}</td>"
+            f"<td>{entry['max_latency_ms']}</td>"
+            f"<td>{entry.get('connections_created', '')}</td>"
+            "</tr>"
+        )
+
+    summary_bits = []
+    for key in ("degraded_at", "critical_sockets", "first_degraded_at", "converged"):
+        if key in report:
+            summary_bits.append(f"<li><b>{key}</b>: {escape(str(report[key]))}</li>")
+
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        f"<title>{title}</title>"
+        "<style>body{font-family:system-ui,sans-serif;margin:2rem;color:#222}"
+        "table{border-collapse:collapse;margin-top:1rem}"
+        "th,td{border:1px solid #ccc;padding:.4rem .8rem;text-align:right}"
+        "th{background:#f0f0f0}caption{text-align:left;font-weight:bold}"
+        "</style></head><body>"
+        f"<h1>{title}</h1>"
+        f"<p>Target: {escape(str(target.get('host', '')))}:"
+        f"{escape(str(target.get('port', '')))} "
+        f"(https={escape(str(target.get('https', '')))})</p>"
+        f"<ul>{''.join(summary_bits)}</ul>"
+        f"{_svg_chart(series)}"
+        "<table><caption>Per-level measurements</caption>"
+        "<tr><th>sockets</th><th>success_rate</th><th>avg_latency_ms</th>"
+        "<th>max_latency_ms</th><th>connections_created</th></tr>"
+        f"{''.join(rows)}</table></body></html>"
+    )
+
+
+def _emit_observability(
+    report: dict[str, object],
+    html_path: str | None,
+    prometheus_path: str | None,
+) -> None:
+    """Write optional HTML and Prometheus renderings of a report."""
+    if html_path:
+        with open(html_path, "w", encoding="utf-8") as handle:
+            handle.write(render_html(report))
+        log.info("HTML report written", path=html_path)
+    if prometheus_path:
+        with open(prometheus_path, "w", encoding="utf-8") as handle:
+            handle.write(render_prometheus(report))
+        log.info("Prometheus metrics written", path=prometheus_path)
+
+
 def _emit_report(report: dict[str, object], report_path: str | None) -> None:
     """Write a report to disk as JSON, or print it to stdout."""
     if report_path:
@@ -666,6 +806,8 @@ async def _run_benchmark(
     step_duration: float,
     fail_under: float,
     report_path: str | None,
+    html_path: str | None = None,
+    prometheus_path: str | None = None,
 ) -> int:
     """Run a resilience benchmark and return a process exit code."""
     benchmark = Benchmark(
@@ -676,6 +818,7 @@ async def _run_benchmark(
     )
     report = await benchmark.run()
     _emit_report(report, report_path)
+    _emit_observability(report, html_path, prometheus_path)
 
     degraded_at = report["degraded_at"]
     if degraded_at is not None:
@@ -693,6 +836,8 @@ async def _run_adaptive(
     fail_under: float,
     min_capacity: int | None,
     report_path: str | None,
+    html_path: str | None = None,
+    prometheus_path: str | None = None,
 ) -> int:
     """Run an adaptive threshold search and return a process exit code."""
     adaptive = AdaptiveBenchmark(
@@ -705,6 +850,7 @@ async def _run_adaptive(
     )
     report = await adaptive.run()
     _emit_report(report, report_path)
+    _emit_observability(report, html_path, prometheus_path)
 
     critical = report["critical_sockets"]
     assert isinstance(critical, int)
@@ -869,6 +1015,20 @@ async def _run_attack(config: Config) -> None:
     type=click.Path(dir_okay=False, writable=True),
     help="Write benchmark report as JSON to this path (default: stdout)",
 )
+@click.option(
+    "--report-html",
+    "html_path",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Write a self-contained HTML report (table + chart) to this path",
+)
+@click.option(
+    "--report-prometheus",
+    "prometheus_path",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Write Prometheus text-exposition metrics to this path",
+)
 @click.version_option(version=__version__)
 def main(
     host: str | None,
@@ -893,6 +1053,8 @@ def main(
     tolerance: int,
     min_capacity: int | None,
     report_path: str | None,
+    html_path: str | None,
+    prometheus_path: str | None,
 ) -> None:
     """Slowloris - Low bandwidth stress test tool for websites."""
 
@@ -949,6 +1111,8 @@ def main(
                     fail_under,
                     min_capacity,
                     report_path,
+                    html_path,
+                    prometheus_path,
                 )
             )
         except KeyboardInterrupt:
@@ -960,7 +1124,15 @@ def main(
         parsed_levels = _parse_levels(levels)
         try:
             exit_code = asyncio.run(
-                _run_benchmark(config, parsed_levels, step_duration, fail_under, report_path)
+                _run_benchmark(
+                    config,
+                    parsed_levels,
+                    step_duration,
+                    fail_under,
+                    report_path,
+                    html_path,
+                    prometheus_path,
+                )
             )
         except KeyboardInterrupt:
             log.info("Interrupted, shutting down")
