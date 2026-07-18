@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0]
+
+### Added
+- **Observability outputs for benchmark/adaptive modes.** `--report-html` writes a self-contained HTML report (summary + per-level table + inline SVG success-rate chart, no external assets). `--report-prometheus` writes Prometheus text-exposition metrics (`slowloris_probe_success_rate`, `slowloris_avg_latency_ms`, and `slowloris_critical_sockets` for adaptive runs) suitable for a node_exporter textfile collector.
+- Each measured level/trial now records a `timestamp`, giving a degradation timeline.
+- Public `render_html()` / `render_prometheus()` helpers.
+
 ## [0.5.0]
 
 ### Added
